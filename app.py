@@ -24,7 +24,7 @@ seg_model_id = "1qq3Wo5vanN_LRGE_ndCl2XD2BbXg5bz_"  # zip SavedModel
 seg_model_dir = "best_model_cbam_attention_unet"
 
 clf_model_path = "Classifier_model.keras"
-clf_model_id = "1fXPICuTkETep2oPiA56l0uMai2GusEJH"  # classifier
+clf_model_id = "1wgAMMN4qV1AHZNKe09f4xj9idO1rL7C3"  # classifier
 
 # ⬇️ Download classifier model (.keras)
 if not os.path.exists(clf_model_path):
