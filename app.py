@@ -63,7 +63,8 @@ def load_models():
     classifier = tf.keras.models.load_model(clf_model_path, compile=False)
 
     # Load segmentation model (SavedModel format)
-    segmentor = tf.keras.models.load_model(seg_model_dir, compile=False)
+    segmentor = tf.keras.models.load_model("best_model_cbam_attention_unet.h5", compile=False)
+
 
     return classifier, segmentor
 
