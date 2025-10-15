@@ -11,51 +11,53 @@ from tensorflow.keras.preprocessing.image import img_to_array
 from io import BytesIO
 
 # ============================================================
-# 🔹 1. CẤU HÌNH các ID & tên file
+# 🔹 1. CẤU HÌNH CÁC ID & TÊN FILE
 # ============================================================
 
-SEG_MODEL_ID = "1JOgis3Yn8YuwZGxsYAj5l-mTvKy7vG2C"  # ID Google Drive cho file .keras mà bạn upload
-CLF_MODEL_ID = "1wgAMMN4qV1AHZNKe09f4xj9idO1rL7C3"  # classifier (nếu vẫn .keras)
+SEG_MODEL_ID = "1LyinwMbjccp9JtaLq3X-V69Qerz26MSo"  # ID Google Drive của model phân đoạn .h5
+CLF_MODEL_ID = "1fXPICuTkETep2oPiA56l0uMai2GusEJH"  # ID Google Drive của model phân loại .h5
 
-SEG_MODEL_PATH = "best_model_cbam_attention_unet.keras"
-CLF_MODEL_PATH = "Classifier_model.keras"
+SEG_MODEL_PATH = "best_model_cbam_attention_unet.h5"
+CLF_MODEL_PATH = "Classifier_model.h5"
 
 # ============================================================
-# 🔹 2. TẢI file nếu chưa có
+# 🔹 2. TẢI FILE MODEL NẾU CHƯA CÓ
 # ============================================================
 
 if not os.path.exists(SEG_MODEL_PATH):
-    st.info("📥 Đang tải model phân đoạn (.keras)...")
+    st.info("📥 Đang tải model phân đoạn (.h5)...")
     gdown.download(f"https://drive.google.com/uc?id={SEG_MODEL_ID}", SEG_MODEL_PATH, quiet=False)
     st.success("✅ Model phân đoạn đã tải xong!")
 
 if not os.path.exists(CLF_MODEL_PATH):
-    st.info("📥 Đang tải model phân loại (.keras)...")
+    st.info("📥 Đang tải model phân loại (.h5)...")
     gdown.download(f"https://drive.google.com/uc?id={CLF_MODEL_ID}", CLF_MODEL_PATH, quiet=False)
     st.success("✅ Model phân loại đã tải xong!")
 
 # ============================================================
-# 🔹 3. Hàm load models (với cache)
+# 🔹 3. LOAD MODELS (CÓ CUSTOM LAYERS)
 # ============================================================
+
+from custom_layers import SEBlock, SpatialAttention, CBAM, AttentionGate
 
 @st.cache_resource(ttl=3600)
 def load_models():
-    # Nếu file .keras của bạn không có custom layer thì không cần custom_objects
-    # Nhưng nếu có custom layer/hàm, bạn có thể khai báo custom_objects
     custom_objects = {
-        "tf": tf,
-        "relu": tf.nn.relu,
-        "sigmoid": tf.nn.sigmoid,
+        "SEBlock": SEBlock,
+        "SpatialAttention": SpatialAttention,
+        "CBAM": CBAM,
+        "AttentionGate": AttentionGate
     }
+
     # Load classifier
     classifier = tf.keras.models.load_model(CLF_MODEL_PATH, compile=False)
+
     # Load segmentation model
     segmentor = tf.keras.models.load_model(SEG_MODEL_PATH, compile=False, custom_objects=custom_objects)
-
     return classifier, segmentor
 
 # ============================================================
-# 🔹 4. Xử lý ảnh (preprocess / postprocess)
+# 🔹 4. XỬ LÝ ẢNH (PREPROCESS / POSTPROCESS)
 # ============================================================
 
 def classify_preprop(image_file):
@@ -91,7 +93,7 @@ def preprocessing_uploader(file, classifier, segmentor):
     return classify_output, segment_output
 
 # ============================================================
-# 🔹 5. Giao diện Streamlit
+# 🔹 5. GIAO DIỆN STREAMLIT
 # ============================================================
 
 st.sidebar.title("📘 Navigation")
@@ -103,7 +105,6 @@ app_mode = st.sidebar.selectbox(
 if app_mode == 'Thông tin chung':
     st.title('👨‍🎓 Giới thiệu về thành viên')
     st.markdown('<h4>Lê Vũ Anh Tin - 11TH</h4>', unsafe_allow_html=True)
-    # Nếu bạn có ảnh Tin.jpg, school.jpg trong repo:
     try:
         tin_ava = Image.open('Tin.jpg')
         st.image(tin_ava, caption='Lê Vũ Anh Tin')
