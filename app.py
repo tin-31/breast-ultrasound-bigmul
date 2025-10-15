@@ -1,7 +1,3 @@
-# ==========================================
-# 🩺 Breast Ultrasound AI Diagnostic App
-# ==========================================
-
 import os
 import gdown
 import streamlit as st
@@ -15,50 +11,51 @@ from tensorflow.keras.preprocessing.image import img_to_array
 from io import BytesIO
 
 # ============================================================
-# 🔹 1. DOWNLOAD MODELS
+# 🔹 1. CẤU HÌNH các ID & tên file
 # ============================================================
 
-# ⬇️ ID Google Drive
-SEG_MODEL_ID = "1LyinwMbjccp9JtaLq3X-V69Qerz26MSo"   # segmentation model (.h5)
-CLF_MODEL_ID = "1wgAMMN4qV1AHZNKe09f4xj9idO1rL7C3"   # classifier model (.keras)
+SEG_MODEL_ID = "1JOgis3Yn8YuwZGxsYAj5l-mTvKy7vG2C"  # ID Google Drive cho file .keras mà bạn upload
+CLF_MODEL_ID = "1wgAMMN4qV1AHZNKe09f4xj9idO1rL7C3"  # classifier (nếu vẫn .keras)
 
-# ⬇️ Tên file lưu
-SEG_MODEL_PATH = "best_model_cbam_attention_unet.h5"
+SEG_MODEL_PATH = "best_model_cbam_attention_unet.keras"
 CLF_MODEL_PATH = "Classifier_model.keras"
 
-# ⬇️ Tải model phân đoạn (.h5)
+# ============================================================
+# 🔹 2. TẢI file nếu chưa có
+# ============================================================
+
 if not os.path.exists(SEG_MODEL_PATH):
-    st.info("📥 Đang tải model phân đoạn...")
+    st.info("📥 Đang tải model phân đoạn (.keras)...")
     gdown.download(f"https://drive.google.com/uc?id={SEG_MODEL_ID}", SEG_MODEL_PATH, quiet=False)
     st.success("✅ Model phân đoạn đã tải xong!")
 
-# ⬇️ Tải model phân loại (.keras)
 if not os.path.exists(CLF_MODEL_PATH):
-    st.info("📥 Đang tải model phân loại...")
+    st.info("📥 Đang tải model phân loại (.keras)...")
     gdown.download(f"https://drive.google.com/uc?id={CLF_MODEL_ID}", CLF_MODEL_PATH, quiet=False)
     st.success("✅ Model phân loại đã tải xong!")
 
 # ============================================================
-# 🔹 2. LOAD MODELS (with custom_objects)
+# 🔹 3. Hàm load models (với cache)
 # ============================================================
 
 @st.cache_resource(ttl=3600)
 def load_models():
-    # Một số model có thể chứa lambda / custom layers
+    # Nếu file .keras của bạn không có custom layer thì không cần custom_objects
+    # Nhưng nếu có custom layer/hàm, bạn có thể khai báo custom_objects
     custom_objects = {
         "tf": tf,
         "relu": tf.nn.relu,
-        "sigmoid": tf.nn.sigmoid
+        "sigmoid": tf.nn.sigmoid,
     }
-
+    # Load classifier
     classifier = tf.keras.models.load_model(CLF_MODEL_PATH, compile=False)
-    segmentor = tf.keras.models.load_model(
-        SEG_MODEL_PATH, compile=False, custom_objects=custom_objects
-    )
+    # Load segmentation model
+    segmentor = tf.keras.models.load_model(SEG_MODEL_PATH, compile=False, custom_objects=custom_objects)
+
     return classifier, segmentor
 
 # ============================================================
-# 🔹 3. IMAGE PREPROCESSING
+# 🔹 4. Xử lý ảnh (preprocess / postprocess)
 # ============================================================
 
 def classify_preprop(image_file):
@@ -72,9 +69,9 @@ def classify_preprop(image_file):
 def segment_preprop(image_file):
     image = Image.open(BytesIO(image_file)).convert("RGB")
     image = image.resize((256, 256))
-    image = np.array(image) / 255.0
-    image = np.expand_dims(image, axis=0)
-    return image
+    arr = np.array(image) / 255.0
+    arr = np.expand_dims(arr, axis=0)
+    return arr
 
 def segment_postprop(image, mask):
     image = np.squeeze(image)
@@ -94,7 +91,7 @@ def preprocessing_uploader(file, classifier, segmentor):
     return classify_output, segment_output
 
 # ============================================================
-# 🔹 4. STREAMLIT APP UI
+# 🔹 5. Giao diện Streamlit
 # ============================================================
 
 st.sidebar.title("📘 Navigation")
@@ -103,21 +100,18 @@ app_mode = st.sidebar.selectbox(
     ['Ứng dụng chẩn đoán', 'Thông tin chung', 'Thống kê về dữ liệu huấn luyện']
 )
 
-# -----------------------------
-# Trang thông tin
-# -----------------------------
 if app_mode == 'Thông tin chung':
     st.title('👨‍🎓 Giới thiệu về thành viên')
     st.markdown('<h4>Lê Vũ Anh Tin - 11TH</h4>', unsafe_allow_html=True)
-    tin_ava = Image.open('Tin.jpg')
-    st.image(tin_ava, caption='Lê Vũ Anh Tin')
-    st.markdown('<h5>Trường THPT Chuyên Nguyễn Du</h5>', unsafe_allow_html=True)
-    school_ava = Image.open('school.jpg')
-    st.image(school_ava, caption='Trường THPT Chuyên Nguyễn Du')
+    # Nếu bạn có ảnh Tin.jpg, school.jpg trong repo:
+    try:
+        tin_ava = Image.open('Tin.jpg')
+        st.image(tin_ava, caption='Lê Vũ Anh Tin')
+        school_ava = Image.open('school.jpg')
+        st.image(school_ava, caption='Trường THPT Chuyên Nguyễn Du')
+    except:
+        pass
 
-# -----------------------------
-# Trang thống kê dữ liệu
-# -----------------------------
 elif app_mode == 'Thống kê về dữ liệu huấn luyện':
     st.title('📊 Thống kê tổng quan về tập dữ liệu')
     st.caption("""
@@ -128,16 +122,12 @@ elif app_mode == 'Thống kê về dữ liệu huấn luyện':
     """)
     st.caption('Chi tiết dataset: https://drive.google.com/drive/folders/1eSAA5pMuEz1GgATBmvXbjjaihO1yBo1l?usp=drive_link')
 
-# -----------------------------
-# Trang ứng dụng chẩn đoán
-# -----------------------------
 elif app_mode == 'Ứng dụng chẩn đoán':
     st.title('🩺 Ứng dụng chẩn đoán bệnh ung thư vú từ ảnh siêu âm')
 
     classifier, segmentor = load_models()
 
     file = st.file_uploader("📤 Tải ảnh siêu âm vú (jpg/png)", type=["jpg", "png"])
-
     if file is None:
         st.info('👆 Vui lòng tải ảnh siêu âm lên để bắt đầu chẩn đoán.')
     else:
@@ -153,7 +143,6 @@ elif app_mode == 'Ứng dụng chẩn đoán':
 
         st.image(segment_output, caption="Ảnh phân đoạn khối u", width=400)
 
-        # Hiển thị kết quả
         if result_name == 'benign':
             st.error('🟢 Chẩn đoán: Bệnh nhân có khối u lành tính.')
         elif result_name == 'malignant':
@@ -163,11 +152,12 @@ elif app_mode == 'Ứng dụng chẩn đoán':
 
         slot.success('✅ Hoàn tất chẩn đoán!')
 
-        # Biểu đồ xác suất
         bar_frame = pd.DataFrame({
             'Loại chẩn đoán': ["Lành tính", "Ác tính", "Bình thường"],
             'Xác suất dự đoán (%)': [
-                classify_output[0,0]*100, classify_output[0,1]*100, classify_output[0,2]*100
+                classify_output[0,0] * 100,
+                classify_output[0,1] * 100,
+                classify_output[0,2] * 100
             ]
         })
         bar_chart = alt.Chart(bar_frame).mark_bar().encode(
