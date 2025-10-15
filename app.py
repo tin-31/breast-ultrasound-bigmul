@@ -66,6 +66,7 @@ def load_models():
     segmentor = tf.keras.models.load_model("best_model_cbam_attention_unet.h5", compile=False)
 
 
+
     return classifier, segmentor
 
 # ============================================================
