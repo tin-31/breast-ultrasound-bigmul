@@ -3,7 +3,6 @@
 # ==========================================
 
 import os
-import zipfile
 import gdown
 import streamlit as st
 import tensorflow as tf
@@ -16,60 +15,52 @@ from tensorflow.keras.preprocessing.image import img_to_array
 from io import BytesIO
 
 # ============================================================
-# 🔹 1. DOWNLOAD & PREPARE MODELS
+# 🔹 1. DOWNLOAD MODELS
 # ============================================================
 
-seg_model_zip = "Seg_model_saved.zip"
-seg_model_id = "1OKwIlCtOCJkIs1pmxLfIFwGYT6yqb2lY"  # zip SavedModel
-seg_model_dir = "best_model_cbam_attention_unet"
+# ⬇️ ID Google Drive
+SEG_MODEL_ID = "1LyinwMbjccp9JtaLq3X-V69Qerz26MSo"   # segmentation model (.h5)
+CLF_MODEL_ID = "1wgAMMN4qV1AHZNKe09f4xj9idO1rL7C3"   # classifier model (.keras)
 
-clf_model_path = "Classifier_model.keras"
-clf_model_id = "1wgAMMN4qV1AHZNKe09f4xj9idO1rL7C3"  # classifier
+# ⬇️ Tên file lưu
+SEG_MODEL_PATH = "best_model_cbam_attention_unet.h5"
+CLF_MODEL_PATH = "Classifier_model.keras"
 
-# ⬇️ Download classifier model (.keras)
-if not os.path.exists(clf_model_path):
+# ⬇️ Tải model phân đoạn (.h5)
+if not os.path.exists(SEG_MODEL_PATH):
+    st.info("📥 Đang tải model phân đoạn...")
+    gdown.download(f"https://drive.google.com/uc?id={SEG_MODEL_ID}", SEG_MODEL_PATH, quiet=False)
+    st.success("✅ Model phân đoạn đã tải xong!")
+
+# ⬇️ Tải model phân loại (.keras)
+if not os.path.exists(CLF_MODEL_PATH):
     st.info("📥 Đang tải model phân loại...")
-    gdown.download(f"https://drive.google.com/uc?id={clf_model_id}", clf_model_path, quiet=False)
+    gdown.download(f"https://drive.google.com/uc?id={CLF_MODEL_ID}", CLF_MODEL_PATH, quiet=False)
     st.success("✅ Model phân loại đã tải xong!")
 
-# ⬇️ Download & extract segmentation model (.zip)
-if not os.path.exists(seg_model_dir):
-    st.info("📦 Đang tải model phân đoạn, vui lòng chờ...")
-    if not os.path.exists(seg_model_zip):
-        gdown.download(f"https://drive.google.com/uc?id={seg_model_id}", seg_model_zip, quiet=False)
-
-    with zipfile.ZipFile(seg_model_zip, 'r') as zip_ref:
-        zip_ref.extractall(".")
-
-    # 🔍 Tự tìm thư mục chứa saved_model.pb (phòng khi zip bị lồng)
-    extracted_root = None
-    for root, dirs, files in os.walk("."):
-        if "saved_model.pb" in files:
-            extracted_root = root
-            break
-
-    if extracted_root:
-        seg_model_dir = extracted_root
-        st.success(f"✅ Đã tìm thấy model tại: {seg_model_dir}")
-    else:
-        st.error("❌ Không tìm thấy saved_model.pb trong file zip!")
-
 # ============================================================
-# 🔹 2. LOAD MODELS
+# 🔹 2. LOAD MODELS (with custom_objects)
 # ============================================================
-@st.cache_resource
+
+@st.cache_resource(ttl=3600)
 def load_models():
-    # Load classifier
-    classifier = tf.keras.models.load_model(clf_model_path, compile=False)
+    # Một số model có thể chứa lambda / custom layers
+    custom_objects = {
+        "tf": tf,
+        "relu": tf.nn.relu,
+        "sigmoid": tf.nn.sigmoid
+    }
 
-    # Load segmentation model (SavedModel format)
-    segmentor = tf.keras.models.load_model("best_model_cbam_attention_unet", compile=False)
-
+    classifier = tf.keras.models.load_model(CLF_MODEL_PATH, compile=False)
+    segmentor = tf.keras.models.load_model(
+        SEG_MODEL_PATH, compile=False, custom_objects=custom_objects
+    )
     return classifier, segmentor
 
 # ============================================================
 # 🔹 3. IMAGE PREPROCESSING
 # ============================================================
+
 def classify_preprop(image_file):
     image = Image.open(BytesIO(image_file)).convert("RGB")
     image = image.resize((224, 224))
@@ -105,12 +96,12 @@ def preprocessing_uploader(file, classifier, segmentor):
 # ============================================================
 # 🔹 4. STREAMLIT APP UI
 # ============================================================
+
 st.sidebar.title("📘 Navigation")
-app_mode = st.sidebar.selectbox('Chọn trang', [
-    'Ứng dụng chẩn đoán',
-    'Thông tin chung',
-    'Thống kê về dữ liệu huấn luyện'
-])
+app_mode = st.sidebar.selectbox(
+    'Chọn trang',
+    ['Ứng dụng chẩn đoán', 'Thông tin chung', 'Thống kê về dữ liệu huấn luyện']
+)
 
 # -----------------------------
 # Trang thông tin
