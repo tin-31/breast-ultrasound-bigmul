@@ -166,7 +166,7 @@ if app_mode == "Thông tin chung":
     st.title("👨‍🎓 Giới thiệu về thành viên")
     st.markdown("<h4>Lê Vũ Anh Tin - 11TH</h4>", unsafe_allow_html=True)
     try:
-        st.image("Tin.jpg", caption="Lê Vũ Anh Tin", width=500)
+        st.image("Tin.jpg", caption="Lê Vũ Anh Tin", width=300)
         st.image("school.jpg", caption="Trường THPT Chuyên Nguyễn Du", width=500)
     except:
         st.info("🖼️ Ảnh giới thiệu chưa được tải lên.")
