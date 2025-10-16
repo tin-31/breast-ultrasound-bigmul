@@ -166,8 +166,8 @@ if app_mode == "Thông tin chung":
     st.title("👨‍🎓 Giới thiệu về thành viên")
     st.markdown("<h4>Lê Vũ Anh Tin - 11TH</h4>", unsafe_allow_html=True)
     try:
-        st.image("Tin.jpg", caption="Lê Vũ Anh Tin", width=250)
-        st.image("school.jpg", caption="Trường THPT Chuyên Nguyễn Du", width=250)
+        st.image("Tin.jpg", caption="Lê Vũ Anh Tin", width=500)
+        st.image("school.jpg", caption="Trường THPT Chuyên Nguyễn Du", width=500)
     except:
         st.info("🖼️ Ảnh giới thiệu chưa được tải lên.")
 
@@ -191,7 +191,7 @@ elif app_mode == "Thống kê về dữ liệu huấn luyện":
 # Trang ứng dụng chẩn đoán
 # -----------------------------
 elif app_mode == "Ứng dụng chẩn đoán":
-    st.title("🩺 Ứng dụng chẩn đoán bệnh ung thư vú từ ảnh siêu âm")
+    st.title("🩺 Ứng dụng chẩn đoán bệnh ung thư vú từ hình ảnh siêu âm")
 
     # Tải mô hình đã fix
     classifier, segmentor = load_models()
