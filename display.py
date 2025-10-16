@@ -165,9 +165,10 @@ app_mode = st.sidebar.selectbox(
 if app_mode == "Thông tin chung":
     st.title("👨‍🎓 Giới thiệu về thành viên")
     st.markdown("<h4>Lê Vũ Anh Tin - 11TH</h4>", unsafe_allow_html=True)
-    st.markdown("<h4>Trường THPT Chuyên Nguyễn Du</h4>", unsafe_allow_html=True)
+    
     try:
         st.image("Tin.jpg", width=500)
+        st.markdown("<h4>Trường THPT Chuyên Nguyễn Du</h4>", unsafe_allow_html=True)
         st.image("school.jpg", width=500)
     except:
         st.info("🖼️ Ảnh giới thiệu chưa được tải lên.")
