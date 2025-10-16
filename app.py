@@ -14,7 +14,7 @@ from io import BytesIO
 # 🔹 1. CẤU HÌNH CÁC ID & TÊN FILE
 # ============================================================
 
-SEG_MODEL_ID = "1LyinwMbjccp9JtaLq3X-V69Qerz26MSo"  # ID Google Drive của model phân đoạn .h5
+SEG_MODEL_ID = "1YbX7lBQCjWXaSyCtwUXftjFHEaBjNnDa"  # ID Google Drive của model phân đoạn .h5
 CLF_MODEL_ID = "1fXPICuTkETep2oPiA56l0uMai2GusEJH"  # ID Google Drive của model phân loại .h5
 
 SEG_MODEL_PATH = "best_model_cbam_attention_unet.h5"
@@ -53,7 +53,7 @@ def load_models():
     classifier = tf.keras.models.load_model(CLF_MODEL_PATH, compile=False)
 
     # Load segmentation model
-    segmentor = tf.keras.models.load_model(SEG_MODEL_PATH, compile=False, custom_objects=custom_objects)
+    segmentor = tf.keras.models.load_model(seg_model_path, compile=False)
     return classifier, segmentor
 
 # ============================================================
