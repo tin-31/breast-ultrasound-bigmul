@@ -18,7 +18,7 @@ from tensorflow.keras.applications.efficientnet import preprocess_input
 # 🔹 Model configuration
 # ==============================
 # SEG_MODEL_ID MỚI đã được cập nhật từ link bạn gửi
-SEG_MODEL_ID = "1PI05-Z7K2TAN-v3Jh7ZPFqygKsQ4gCYV" # ✅ Model phân đoạn (FIXED)
+SEG_MODEL_ID = "1PI05-Z7K2TAN-v3Jh7ZPFYgKsQ4gCYV" # ✅ Model phân đoạn (FIXED)
 CLF_MODEL_ID = "1fXPICuTkETep2oPiA56l0uMai2GusEJH" # ✅ Model phân loại
 
 SEG_MODEL_PATH = "seg_model.keras"
@@ -100,39 +100,31 @@ def segment_preprop(image_bytes):
     image = np.expand_dims(image, axis=0)
     return image
 
-# CHỈNH SỬA: Hiển thị màu sắc cho các vùng phân đoạn: Đỏ (Ác tính), Vàng (Lành tính)
+# CẬP NHẬT: Hiển thị màu sắc theo yêu cầu mới: Đỏ (Ác tính), Xanh (Lành tính)
 def segment_postprop(image, mask, alpha=0.5):
     """
     Tạo lớp phủ màu sắc lên ảnh gốc dựa trên kết quả phân đoạn.
     - Class 0 (Background/Normal): Giữ màu ảnh gốc
-    - Class 1 (Benign/Lành tính): Màu Vàng (Yellow)
-    - Class 2 (Malignant/Ác tính): Màu Đỏ (Red)
+    - Class 1 (Benign/Lành tính): Màu Xanh (Green: [0, 1, 0])
+    - Class 2 (Malignant/Ác tính): Màu Đỏ (Red: [1, 0, 0])
     """
-    # Lấy ảnh gốc (256, 256, 3) từ batch đầu vào, range [0, 1]
     original_img = np.squeeze(image[0]) 
-
-    # Lấy chỉ số lớp dự đoán (0, 1, 2)
     mask_indices = np.argmax(mask, axis=-1)
 
-    # Định nghĩa màu sắc (RGB, 0-1)
-    COLOR_BENIGN = np.array([1.0, 1.0, 0.0])    # Vàng
-    COLOR_MALIGNANT = np.array([1.0, 0.0, 0.0]) # Đỏ
+    # ĐỊNH NGHĨA MÀU SẮC MỚI
+    COLOR_BENIGN = np.array([0.0, 1.0, 0.0])    # Xanh lá (Lành tính)
+    COLOR_MALIGNANT = np.array([1.0, 0.0, 0.0]) # Đỏ (Ác tính)
 
-    # Tạo bản đồ màu
     color_map = np.zeros_like(original_img, dtype=np.float32)
     
     # Áp dụng màu cho Benign (1) và Malignant (2)
     color_map[mask_indices == 1] = COLOR_BENIGN
     color_map[mask_indices == 2] = COLOR_MALIGNANT
     
-    # Tạo ảnh đã phân đoạn (bắt đầu bằng ảnh gốc)
     segmented_image = original_img.copy()
-    
-    # Lấy vị trí các pixel được phân loại là Benign hoặc Malignant
     segment_locations = mask_indices > 0
     
     # Trộn màu (Blending) chỉ tại các vị trí khối u
-    # Blended = (Original * (1 - alpha)) + (Color * alpha)
     segmented_image[segment_locations] = (
         original_img[segment_locations] * (1 - alpha) + 
         color_map[segment_locations] * alpha
@@ -218,7 +210,8 @@ elif app_mode == "Ứng dụng chẩn đoán":
         with col1:
             st.image(input_image, caption="Ảnh gốc", use_container_width=True)
         with col2:
-            st.image(seg_image, caption="Kết quả phân đoạn (Đỏ: Ác tính, Vàng: Lành tính)", use_container_width=True)
+            # Tên chú thích được cập nhật
+            st.image(seg_image, caption="Kết quả phân đoạn (Đỏ: Ác tính, Xanh: Lành tính)", use_container_width=True)
 
         class_names = ["benign", "malignant", "normal"]
         # Phân loại là lành tính: index 0, ác tính: index 1, bình thường: index 2
@@ -238,6 +231,9 @@ elif app_mode == "Ứng dụng chẩn đoán":
         st.markdown("---")
         st.subheader("📈 Chi tiết xác suất")
 
+        # CẬP NHẬT: Hiển thị xác suất chi tiết nhất có thể (15 chữ số thập phân)
+        format_spec = ".15f" 
+        
         # Đảm bảo thứ tự class_names khớp với thứ tự đầu ra của mô hình (benign, malignant, normal)
         chart_df = pd.DataFrame({
             "Loại chẩn đoán": ["Lành tính", "Ác tính", "Bình thường"],
@@ -250,14 +246,17 @@ elif app_mode == "Ứng dụng chẩn đoán":
                 domain=["Lành tính", "Ác tính", "Bình thường"],
                 range=["#10B981", "#EF4444", "#9CA3AF"]
             )),
-            tooltip=["Loại chẩn đoán", alt.Tooltip("Xác suất (%)", format=".1f")]
+            # Cập nhật tooltip để hiển thị chi tiết
+            tooltip=["Loại chẩn đoán", alt.Tooltip("Xác suất (%)", format=format_spec)]
         ).properties(
             title="Biểu đồ Xác suất Chẩn đoán"
         )
         st.altair_chart(chart, use_container_width=True)
 
-        st.write(f"- **Khối u lành tính:** **{pred_class[0,0]*100:.2f}%**")
-        st.write(f"- **Ung thư vú (Ác tính):** **{pred_class[0,1]*100:.2f}%**")
-        st.write(f"- **Bình thường:** **{pred_class[0,2]*100:.2f}%**")
+        st.markdown(f"""
+        - Xác suất bệnh nhân có khối u lành tính là: **{pred_class[0,0]*100:{format_spec}}%**
+        - Xác suất bệnh nhân mắc ung thư vú là: **{pred_class[0,1]*100:{format_spec}}%**
+        - Xác suất bệnh nhân khỏe mạnh là: **{pred_class[0,2]*100:{format_spec}}%**
+        """)
 
         slot.success("✅ Hoàn tất chẩn đoán!")
