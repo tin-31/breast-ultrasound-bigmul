@@ -44,15 +44,17 @@ if not os.path.exists(CLF_MODEL_PATH):
 
 @st.cache_resource(ttl=3600)
 def load_models():
+    import keras
+    keras.config.enable_unsafe_deserialization()  # ✅ Cho phép load Lambda layer
+
     try:
-        # Load model phân loại
         clf = tf.keras.models.load_model(CLF_MODEL_PATH, compile=False)
-        # Load model phân đoạn (.keras format — không cần custom_objects)
         seg = tf.keras.models.load_model(SEG_MODEL_PATH, compile=False)
         return clf, seg
     except Exception as e:
         st.error(f"❌ Lỗi khi load models: {e}")
         raise e
+
 
 # ============================================================
 # 🔹 4. XỬ LÝ ẢNH
