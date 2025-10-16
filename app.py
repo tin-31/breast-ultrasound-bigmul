@@ -15,7 +15,7 @@ from io import BytesIO
 # ============================================================
 
 # 🧠 Model phân đoạn (.keras — phiên bản mới, không lỗi lambda)
-SEG_MODEL_ID = "1YbX7lBQCjWXaSyCtwUXftjFHEaBjNnDa"
+SEG_MODEL_ID = "1CYBZRssHYWNErdU0SbcYdhzGIwHIL2ra"
 
 # 🧩 Model phân loại (.h5)
 CLF_MODEL_ID = "1fXPICuTkETep2oPiA56l0uMai2GusEJH"
