@@ -18,7 +18,7 @@ from tensorflow.keras.applications.efficientnet import preprocess_input
 # 🔹 Model configuration
 # ==============================
 # SEG_MODEL_ID MỚI đã được cập nhật từ link bạn gửi
-SEG_MODEL_ID = "1PI05-Z7K2TAN-v3Jh7ZPFYgKsQ4gCYV" # ✅ Model phân đoạn (FIXED)
+SEG_MODEL_ID = "1axOg7N5ssJrMec97eV-JMPzID26ynzN1" # ✅ Model phân đoạn (FIXED)
 CLF_MODEL_ID = "1fXPICuTkETep2oPiA56l0uMai2GusEJH" # ✅ Model phân loại
 
 SEG_MODEL_PATH = "seg_model.keras"
