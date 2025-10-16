@@ -1,5 +1,5 @@
 # ==========================================
-# 🩺 Breast Ultrasound AI Diagnostic App (Auto Model Loader - Updated)
+# 🩺 Breast Ultrasound AI Diagnostic App (Fixed Model Loader)
 # ==========================================
 
 import os
@@ -17,11 +17,27 @@ from tensorflow.keras.applications.efficientnet import preprocess_input
 # ==============================
 # 🔹 Model configuration
 # ==============================
-SEG_MODEL_ID = "1CYBZRssHYWNErdU0SbcYdhzGIwHIL2ra"  # ✅ Model phân đoạn
-CLF_MODEL_ID = "1fXPICuTkETep2oPiA56l0uMai2GusEJH"  # ✅ Model phân loại
+# SEG_MODEL_ID MỚI đã được cập nhật từ link bạn gửi
+SEG_MODEL_ID = "1PI05-Z7K2TAN-v3Jh7ZPFqygKsQ4gCYV" # ✅ Model phân đoạn (FIXED)
+CLF_MODEL_ID = "1fXPICuTkETep2oPiA56l0uMai2GusEJH" # ✅ Model phân loại
 
 SEG_MODEL_PATH = "seg_model.keras"
 CLF_MODEL_PATH = "clf_model.h5"
+
+# ==============================
+# 🔹 Custom Lambda Functions (Định nghĩa lại các hàm Lambda đã đặt tên trong CBAM)
+# ==============================
+def spatial_mean(t):
+    """Channel Average Pooling cho Spatial Attention."""
+    return tf.reduce_mean(t, axis=-1, keepdims=True)
+
+def spatial_max(t):
+    """Channel Max Pooling cho Spatial Attention."""
+    return tf.reduce_max(t, axis=-1, keepdims=True)
+
+def spatial_output_shape(s):
+    """Output shape (batch, height, width, 1) cho Spatial Attention."""
+    return (s[0], s[1], s[2], 1)
 
 # ==============================
 # 🔹 Auto download models
@@ -29,7 +45,7 @@ CLF_MODEL_PATH = "clf_model.h5"
 def download_model(model_id, output_path, model_name):
     """Tự động tải model từ Google Drive nếu chưa tồn tại"""
     if not os.path.exists(output_path):
-        st.info(f"📥 Đang tải {model_name} ...")
+        st.info(f"📥 Đang tải {model_name} (ID: {model_id})...")
         gdown.download(f"https://drive.google.com/uc?id={model_id}", output_path, quiet=False)
         st.success(f"✅ {model_name} đã được tải xong!")
 
@@ -37,18 +53,33 @@ download_model(SEG_MODEL_ID, SEG_MODEL_PATH, "model phân đoạn")
 download_model(CLF_MODEL_ID, CLF_MODEL_PATH, "model phân loại")
 
 # ==============================
-# 🔹 Load both models safely
+# 🔹 Load both models safely (FIXED: Sử dụng custom_objects)
 # ==============================
 @st.cache_resource
 def load_models():
+    # Khai báo các đối tượng tùy chỉnh (Lambda functions)
+    CUSTOM_OBJECTS = {
+        "spatial_mean": spatial_mean,
+        "spatial_max": spatial_max,
+        "spatial_output_shape": spatial_output_shape
+    }
+
     from tensorflow import keras
     try:
+        # Cố gắng bật chế độ bỏ qua kiểm tra an toàn (nếu cần)
         keras.config.enable_unsafe_deserialization()
     except Exception:
         pass
 
+    # Tải model phân loại
     classifier = tf.keras.models.load_model(CLF_MODEL_PATH, compile=False)
-    segmentor = tf.keras.models.load_model(SEG_MODEL_PATH, compile=False)
+    
+    # Tải model phân đoạn với custom_objects để giải quyết lỗi Lambda Layer
+    segmentor = tf.keras.models.load_model(
+        SEG_MODEL_PATH, 
+        custom_objects=CUSTOM_OBJECTS,
+        compile=False
+    )
     return classifier, segmentor
 
 # ==============================
@@ -82,6 +113,7 @@ def predict_pipeline(file, classifier, segmentor):
     img_clf = classify_preprop(image_bytes)
     img_seg = segment_preprop(image_bytes)
 
+    # Sử dụng CPU để dự đoán
     with tf.device("/CPU:0"):
         pred_class = classifier.predict(img_clf, verbose=0)
         pred_mask = segmentor.predict(img_seg, verbose=0)[0]
@@ -134,6 +166,7 @@ elif app_mode == "Thống kê về dữ liệu huấn luyện":
 elif app_mode == "Ứng dụng chẩn đoán":
     st.title("🩺 Ứng dụng chẩn đoán bệnh ung thư vú từ ảnh siêu âm")
 
+    # Tải mô hình đã fix
     classifier, segmentor = load_models()
     file = st.file_uploader("📤 Tải ảnh siêu âm (JPG hoặc PNG)", type=["jpg", "png"])
 
@@ -153,27 +186,43 @@ elif app_mode == "Ứng dụng chẩn đoán":
             st.image(seg_image, caption="Kết quả phân đoạn", use_container_width=True)
 
         class_names = ["benign", "malignant", "normal"]
-        result = class_names[np.argmax(pred_class)]
+        # Phân loại là lành tính: index 0, ác tính: index 1, bình thường: index 2
+        result_index = np.argmax(pred_class)
+        result = class_names[result_index]
+        
+        st.markdown("---")
+        st.subheader("💡 Kết quả phân loại")
+
         if result == "benign":
             st.success("🟢 Kết luận: Khối u lành tính.")
         elif result == "malignant":
             st.error("🔴 Kết luận: Ung thư vú ác tính.")
         else:
-            st.info("⚪ Kết luận: Không phát hiện khối u.")
+            st.info("⚪ Kết luận: Không phát hiện khối u (Bình thường).")
+            
+        st.markdown("---")
+        st.subheader("📈 Chi tiết xác suất")
 
-        slot.success("✅ Hoàn tất chẩn đoán!")
-
+        # Đảm bảo thứ tự class_names khớp với thứ tự đầu ra của mô hình (benign, malignant, normal)
         chart_df = pd.DataFrame({
             "Loại chẩn đoán": ["Lành tính", "Ác tính", "Bình thường"],
             "Xác suất (%)": [pred_class[0,0]*100, pred_class[0,1]*100, pred_class[0,2]*100]
         })
         chart = alt.Chart(chart_df).mark_bar().encode(
-            x="Loại chẩn đoán",
-            y="Xác suất (%)",
-            color="Loại chẩn đoán"
+            x=alt.X("Loại chẩn đoán", sort=None),
+            y=alt.Y("Xác suất (%)", scale=alt.Scale(domain=[0, 100])),
+            color=alt.Color("Loại chẩn đoán", scale=alt.Scale(
+                domain=["Lành tính", "Ác tính", "Bình thường"],
+                range=["#10B981", "#EF4444", "#9CA3AF"]
+            )),
+            tooltip=["Loại chẩn đoán", alt.Tooltip("Xác suất (%)", format=".1f")]
+        ).properties(
+            title="Biểu đồ Xác suất Chẩn đoán"
         )
         st.altair_chart(chart, use_container_width=True)
 
-        st.write(f"- **Khối u lành tính:** {pred_class[0,0]*100:.1f}%")
-        st.write(f"- **Ung thư vú:** {pred_class[0,1]*100:.1f}%")
-        st.write(f"- **Bình thường:** {pred_class[0,2]*100:.1f}%")
+        st.write(f"- **Khối u lành tính:** **{pred_class[0,0]*100:.2f}%**")
+        st.write(f"- **Ung thư vú (Ác tính):** **{pred_class[0,1]*100:.2f}%**")
+        st.write(f"- **Bình thường:** **{pred_class[0,2]*100:.2f}%**")
+
+        slot.success("✅ Hoàn tất chẩn đoán!")
