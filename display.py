@@ -1,5 +1,5 @@
 # ==========================================
-# 🩺 Breast Ultrasound AI Diagnostic App (Tiếng Việt)
+# 🩺 Breast Ultrasound AI Diagnostic App (Fixed Model Loader)
 # ==========================================
 
 import os
@@ -15,21 +15,17 @@ from tensorflow.keras.preprocessing.image import img_to_array
 from tensorflow.keras.applications.efficientnet import preprocess_input
 
 # ==============================
-# 🔹 Cấu hình trang
+# 🔹 Model configuration
 # ==============================
-st.set_page_config(page_title="Breast Ultrasound AI", layout="wide", page_icon="🩺")
-
-# ==============================
-# 🔹 Cấu hình model
-# ==============================
-SEG_MODEL_ID = "1axOg7N5ssJrMec97eV-JMPzID26ynzN1"  # Model phân đoạn (FIXED)
-CLF_MODEL_ID = "1fXPICuTkETep2oPiA56l0uMai2GusEJH"  # Model phân loại
+# SEG_MODEL_ID MỚI đã được cập nhật từ link bạn gửi
+SEG_MODEL_ID = "1axOg7N5ssJrMec97eV-JMPzID26ynzN1" # ✅ Model phân đoạn (FIXED)
+CLF_MODEL_ID = "1fXPICuTkETep2oPiA56l0uMai2GusEJH" # ✅ Model phân loại
 
 SEG_MODEL_PATH = "seg_model.keras"
 CLF_MODEL_PATH = "clf_model.h5"
 
 # ==============================
-# 🔹 Hàm Lambda tùy chỉnh (CBAM)
+# 🔹 Custom Lambda Functions (Định nghĩa lại các hàm Lambda đã đặt tên trong CBAM)
 # ==============================
 def spatial_mean(t):
     """Channel Average Pooling cho Spatial Attention."""
@@ -44,7 +40,7 @@ def spatial_output_shape(s):
     return (s[0], s[1], s[2], 1)
 
 # ==============================
-# 🔹 Tự động tải model từ Google Drive nếu cần
+# 🔹 Auto download models
 # ==============================
 def download_model(model_id, output_path, model_name):
     """Tự động tải model từ Google Drive nếu chưa tồn tại"""
@@ -57,7 +53,7 @@ download_model(SEG_MODEL_ID, SEG_MODEL_PATH, "model phân đoạn")
 download_model(CLF_MODEL_ID, CLF_MODEL_PATH, "model phân loại")
 
 # ==============================
-# 🔹 Load models an toàn (sử dụng custom_objects)
+# 🔹 Load both models safely (FIXED: Sử dụng custom_objects)
 # ==============================
 @st.cache_resource
 def load_models():
@@ -87,7 +83,7 @@ def load_models():
     return classifier, segmentor
 
 # ==============================
-# 🔹 Tiền xử lý ảnh
+# 🔹 Image preprocessing
 # ==============================
 def classify_preprop(image_bytes):
     image = Image.open(BytesIO(image_bytes)).convert("RGB")
@@ -104,9 +100,7 @@ def segment_preprop(image_bytes):
     image = np.expand_dims(image, axis=0)
     return image
 
-# ==============================
-# 🔹 Post-process phân đoạn (màu: Đỏ = Ác tính, Xanh = Lành tính)
-# ==============================
+# CẬP NHẬT: Hiển thị màu sắc theo yêu cầu mới: Đỏ (Ác tính), Xanh (Lành tính)
 def segment_postprop(image, mask, alpha=0.5):
     """
     Tạo lớp phủ màu sắc lên ảnh gốc dựa trên kết quả phân đoạn.
@@ -117,7 +111,7 @@ def segment_postprop(image, mask, alpha=0.5):
     original_img = np.squeeze(image[0]) 
     mask_indices = np.argmax(mask, axis=-1)
 
-    # ĐỊNH NGHĨA MÀU SẮC
+    # ĐỊNH NGHĨA MÀU SẮC MỚI
     COLOR_BENIGN = np.array([0.0, 1.0, 0.0])    # Xanh lá (Lành tính)
     COLOR_MALIGNANT = np.array([1.0, 0.0, 0.0]) # Đỏ (Ác tính)
 
@@ -139,7 +133,7 @@ def segment_postprop(image, mask, alpha=0.5):
     return segmented_image
 
 # ==============================
-# 🔹 Pipeline dự đoán
+# 🔹 Prediction pipeline
 # ==============================
 def predict_pipeline(file, classifier, segmentor):
     image_bytes = file.read()
@@ -155,9 +149,10 @@ def predict_pipeline(file, classifier, segmentor):
     return pred_class, seg_image, image_bytes
 
 # ==============================
-# 🔹 Giao diện Streamlit (Tiếng Việt)
+# 🔹 Streamlit UI
 # ==============================
-st.sidebar.title("📘 Navigation")
+st.set_page_config(page_title="AI Siêu Âm Vú", layout="wide", page_icon="🩺")
+st.sidebar.title("📘 Điều hướng")
 
 app_mode = st.sidebar.selectbox(
     "Chọn trang",
@@ -184,7 +179,7 @@ if app_mode == "Thông tin chung":
 elif app_mode == "Thống kê về dữ liệu huấn luyện":
     st.title("📊 Thống kê tổng quan về tập dữ liệu")
     st.caption("""
-    Tập dữ liệu **Breast Ultrasound Images (BUI)** được kết hợp từ ba nguồn:
+    Tập dữ liệu **Hình ảnh Siêu âm Vú (BUI)** được kết hợp từ ba nguồn:
     - BUSI (Arya Shah, Kaggle): ~780 ảnh siêu âm vú với mặt nạ phân đoạn (benign, malignant, normal).
     - BUS-UCLM (Orvile, Kaggle): 683 ảnh siêu âm vú với mặt nạ phân đoạn (benign, malignant, normal).
     - Breast Lesions USG (Cancer Imaging Archive): 163 trường hợp với ảnh siêu âm vú (DICOM) và chú thích tổn thương.
@@ -227,9 +222,11 @@ elif app_mode == "Ứng dụng chẩn đoán":
         with col1:
             st.image(input_image, caption="Ảnh gốc", use_container_width=True)
         with col2:
+            # Tên chú thích được cập nhật
             st.image(seg_image, caption="Kết quả phân đoạn (Đỏ: Ác tính, Xanh: Lành tính)", use_container_width=True)
 
         class_names = ["benign", "malignant", "normal"]
+        # Phân loại là lành tính: index 0, ác tính: index 1, bình thường: index 2
         result_index = np.argmax(pred_class)
         result = class_names[result_index]
         
@@ -246,9 +243,10 @@ elif app_mode == "Ứng dụng chẩn đoán":
         st.markdown("---")
         st.subheader("📈 Chi tiết xác suất")
 
-        # Hiển thị xác suất chi tiết nhất có thể (15 chữ số thập phân)
+        # CẬP NHẬT: Hiển thị xác suất chi tiết nhất có thể (15 chữ số thập phân)
         format_spec = ".15f" 
         
+        # Đảm bảo thứ tự class_names khớp với thứ tự đầu ra của mô hình (benign, malignant, normal)
         chart_df = pd.DataFrame({
             "Loại chẩn đoán": ["Lành tính", "Ác tính", "Bình thường"],
             "Xác suất (%)": [pred_class[0,0]*100, pred_class[0,1]*100, pred_class[0,2]*100]
@@ -260,6 +258,7 @@ elif app_mode == "Ứng dụng chẩn đoán":
                 domain=["Lành tính", "Ác tính", "Bình thường"],
                 range=["#10B981", "#EF4444", "#9CA3AF"]
             )),
+            # Cập nhật tooltip để hiển thị chi tiết
             tooltip=["Loại chẩn đoán", alt.Tooltip("Xác suất (%)", format=format_spec)]
         ).properties(
             title="Biểu đồ Xác suất Chẩn đoán"
