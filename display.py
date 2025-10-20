@@ -179,15 +179,25 @@ if app_mode == "Thông tin chung":
 elif app_mode == "Thống kê về dữ liệu huấn luyện":
     st.title("📊 Thống kê tổng quan về tập dữ liệu")
     st.caption("""
-    Tập dữ liệu **Breast Ultrasound Images (BUI)** được kết hợp từ hai nguồn:
-    - BUSI (Arya Shah, Kaggle)
-    - BUS-UCLM (Orvile, Kaggle)
+    Tập dữ liệu **Breast Ultrasound Images (BUI)** được kết hợp từ ba nguồn:
+    - BUSI (Arya Shah, Kaggle): ~780 ảnh siêu âm vú với mặt nạ phân đoạn (benign, malignant, normal).
+    - BUS-UCLM (Orvile, Kaggle): 683 ảnh siêu âm vú với mặt nạ phân đoạn (benign, malignant, normal).
+    - Breast Lesions USG (Cancer Imaging Archive): 163 trường hợp với ảnh siêu âm vú (DICOM) và chú thích tổn thương.
     
     Tổng cộng **1578 ảnh siêu âm vú** có mặt nạ phân đoạn tương ứng.
     """)
-    st.markdown(
-        "[🔗 Link dataset gốc](https://drive.google.com/drive/folders/1eSAA5pMuEz1GgATBmvXbjjaihO1yBo1l?usp=drive_link)"
-    )
+    st.markdown("""
+    ### 🔗 Nguồn dữ liệu và trích dẫn
+    Dữ liệu được thu thập từ các nguồn công khai sau, với trích dẫn theo định dạng APA:
+    
+    | Nguồn | Số lượng | Mô tả | Link | Trích dẫn |
+    |-------|----------|--------|------|-----------|
+    | BUSI (Arya Shah, Kaggle) | ~780 ảnh | Ảnh siêu âm vú với mặt nạ phân đoạn (benign, malignant, normal) | [Link](https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset/data) | Shah, A. (2020). Breast Ultrasound Images Dataset [Dataset]. Kaggle. https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset/data |
+    | BUS-UCLM (Orvile, Kaggle) | 683 ảnh | Ảnh siêu âm vú với mặt nạ phân đoạn (benign, malignant, normal) | [Link](https://www.kaggle.com/datasets/orvile/bus-uclm-breast-ultrasound-dataset) | Orvile. (2023). BUS-UCLM Breast Ultrasound Dataset [Dataset]. Kaggle. https://www.kaggle.com/datasets/orvile/bus-uclm-breast-ultrasound-dataset |
+    | Breast Lesions USG (Cancer Imaging Archive) | 163 trường hợp | Ảnh siêu âm vú (DICOM) với chú thích tổn thương | [Link](https://www.cancerimagingarchive.net/collection/breast-lesions-usg/) | The Cancer Imaging Archive (TCIA). (2021). Breast Lesions USG [Dataset]. Cancer Imaging Archive. https://www.cancerimagingarchive.net/collection/breast-lesions-usg/ |
+    
+    **Tổng số ảnh:** 1578 ảnh siêu âm vú với mặt nạ phân đoạn.
+    """)
 
 # -----------------------------
 # Trang ứng dụng chẩn đoán
