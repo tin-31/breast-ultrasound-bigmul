@@ -1,5 +1,5 @@
 # ==========================================
-# 🩺 Breast Ultrasound AI Diagnostic App (with Language Toggle)
+# 🩺 Breast Ultrasound AI Diagnostic App (with Language Toggle, no content loss)
 # ==========================================
 
 import os
@@ -51,7 +51,6 @@ def load_models():
     from tensorflow import keras
     try: keras.config.enable_unsafe_deserialization()
     except Exception: pass
-
     classifier = tf.keras.models.load_model(CLF_MODEL_PATH, compile=False)
     segmentor = tf.keras.models.load_model(SEG_MODEL_PATH, custom_objects=CUSTOM_OBJECTS, compile=False)
     return classifier, segmentor
@@ -71,8 +70,8 @@ def segment_postprop(image, mask, alpha=0.5):
     original_img = np.squeeze(image[0])
     mask_indices = np.argmax(mask, axis=-1)
     color_map = np.zeros_like(original_img, dtype=np.float32)
-    color_map[mask_indices == 1] = [0, 1, 0]  # Green
-    color_map[mask_indices == 2] = [1, 0, 0]  # Red
+    color_map[mask_indices == 1] = [0, 1, 0]
+    color_map[mask_indices == 2] = [1, 0, 0]
     seg_image = original_img.copy()
     seg_image[mask_indices > 0] = (
         original_img[mask_indices > 0] * (1 - alpha) + color_map[mask_indices > 0] * alpha
@@ -102,8 +101,8 @@ if "lang" not in st.session_state:
     st.session_state.lang = "vi"
 
 # --- Language toggle (top-right corner) ---
-toggle_col = st.columns([8, 1])
-with toggle_col[1]:
+top_cols = st.columns([8, 1])
+with top_cols[1]:
     if st.session_state.lang == "vi":
         if st.button("🇬🇧 EN"):
             st.session_state.lang = "en"
@@ -118,32 +117,18 @@ TEXT = {
     "vi": {
         "nav": "📘 Navigation",
         "pages": ["Ứng dụng chẩn đoán", "Thông tin chung", "Thống kê về dữ liệu huấn luyện"],
-        "intro_title": "👨‍🎓 Giới thiệu về thành viên",
-        "data_title": "📊 Thống kê tổng quan về tập dữ liệu",
-        "app_title": "🩺 Ứng dụng chẩn đoán bệnh ung thư vú từ hình ảnh siêu âm",
         "upload": "📤 Tải ảnh siêu âm (JPG hoặc PNG)",
-        "waiting": "👆 Vui lòng tải ảnh lên để bắt đầu chẩn đoán.",
+        "wait": "👆 Vui lòng tải ảnh lên để bắt đầu chẩn đoán.",
         "analyzing": "⏳ Đang phân tích ảnh...",
-        "benign": "🟢 Kết luận: Khối u lành tính.",
-        "malignant": "🔴 Kết luận: Ung thư vú ác tính.",
-        "normal": "⚪ Kết luận: Không phát hiện khối u (Bình thường).",
-        "prob_title": "📈 Chi tiết xác suất",
-        "chart_title": "Biểu đồ Xác suất Chẩn đoán",
+        "app_title": "🩺 Ứng dụng chẩn đoán bệnh ung thư vú từ hình ảnh siêu âm",
     },
     "en": {
         "nav": "📘 Navigation",
         "pages": ["Diagnosis App", "About Members", "Dataset Overview"],
-        "intro_title": "👨‍🎓 About Members",
-        "data_title": "📊 Dataset Overview",
-        "app_title": "🩺 Breast Cancer Diagnosis from Ultrasound Images",
         "upload": "📤 Upload Ultrasound Image (JPG or PNG)",
-        "waiting": "👆 Please upload an image to start diagnosis.",
+        "wait": "👆 Please upload an image to start diagnosis.",
         "analyzing": "⏳ Analyzing image...",
-        "benign": "🟢 Result: Benign tumor.",
-        "malignant": "🔴 Result: Malignant breast cancer.",
-        "normal": "⚪ Result: No tumor detected (Normal).",
-        "prob_title": "📈 Probability Details",
-        "chart_title": "Diagnosis Probability Chart",
+        "app_title": "🩺 Breast Cancer Diagnosis from Ultrasound Images",
     }
 }
 
@@ -152,60 +137,87 @@ st.sidebar.title(TEXT[lang]["nav"])
 app_mode = st.sidebar.selectbox("Chọn trang" if lang == "vi" else "Select page", TEXT[lang]["pages"])
 
 # ==============================
-# 🔹 Page Routing
+# 🔹 Pages
 # ==============================
-if app_mode == TEXT[lang]["pages"][1]:
-    st.title(TEXT[lang]["intro_title"])
-    st.image("Tin.jpg", width=500)
-    st.markdown("<h4>Trường THPT Chuyên Nguyễn Du</h4>", unsafe_allow_html=True)
-    st.image("school.jpg", width=500)
+if app_mode == TEXT[lang]["pages"][1]:  # Thông tin chung
+    st.title("👨‍🎓 Giới thiệu về thành viên")
+    st.markdown("<h4>Lê Vũ Anh Tin - 11TH</h4>", unsafe_allow_html=True)
+    try:
+        st.image("Tin.jpg", width=500)
+        st.markdown("<h4>Trường THPT Chuyên Nguyễn Du</h4>", unsafe_allow_html=True)
+        st.image("school.jpg", width=500)
+    except:
+        st.info("🖼️ Ảnh giới thiệu chưa được tải lên.")
 
-elif app_mode == TEXT[lang]["pages"][2]:
-    st.title(TEXT[lang]["data_title"])
-    st.caption("Hiển thị thống kê và nguồn dữ liệu huấn luyện (bản tiếng Việt được giữ nguyên).")
+elif app_mode == TEXT[lang]["pages"][2]:  # Thống kê
+    st.title("📊 Thống kê tổng quan về tập dữ liệu")
+    st.caption("""
+    Tập dữ liệu **Breast Ultrasound Images (BUI)** được kết hợp từ ba nguồn:
+    - BUSI (Arya Shah, Kaggle): ~780 ảnh siêu âm vú với mặt nạ phân đoạn (benign, malignant, normal).
+    - BUS-UCLM (Orvile, Kaggle): 683 ảnh siêu âm vú với mặt nạ phân đoạn (benign, malignant, normal).
+    - Breast Lesions USG (Cancer Imaging Archive): 163 trường hợp với ảnh siêu âm vú (DICOM) và chú thích tổn thương.
+    
+    Tổng cộng **1578 ảnh siêu âm vú** có mặt nạ phân đoạn tương ứng.
+    """)
+    st.markdown("""
+    ### 🔗 Nguồn dữ liệu và trích dẫn
+    Dữ liệu được thu thập từ các nguồn công khai sau, với trích dẫn theo định dạng APA:
+    
+    | Nguồn | Số lượng | Mô tả | Link | Trích dẫn |
+    |-------|----------|--------|------|-----------|
+    | BUSI (Arya Shah, Kaggle) | ~780 ảnh | Ảnh siêu âm vú với mặt nạ phân đoạn (benign, malignant, normal) | [Link](https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset/data) | Shah, A. (2020). Breast Ultrasound Images Dataset [Dataset]. Kaggle. https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset/data |
+    | BUS-UCLM (Orvile, Kaggle) | 683 ảnh | Ảnh siêu âm vú với mặt nạ phân đoạn (benign, malignant, normal) | [Link](https://www.kaggle.com/datasets/orvile/bus-uclm-breast-ultrasound-dataset) | Orvile. (2023). BUS-UCLM Breast Ultrasound Dataset [Dataset]. Kaggle. https://www.kaggle.com/datasets/orvile/bus-uclm-breast-ultrasound-dataset |
+    | Breast Lesions USG (Cancer Imaging Archive) | 163 trường hợp | Ảnh siêu âm vú (DICOM) với chú thích tổn thương | [Link](https://www.cancerimagingarchive.net/collection/breast-lesions-usg/) | The Cancer Imaging Archive (TCIA). (2021). Breast Lesions USG [Dataset]. Cancer Imaging Archive. https://www.cancerimagingarchive.net/collection/breast-lesions-usg/ |
+    
+    **Tổng số ảnh:** 1578 ảnh siêu âm vú với mặt nạ phân đoạn.
+    """)
 
-else:
+else:  # Ứng dụng chẩn đoán
     st.title(TEXT[lang]["app_title"])
     classifier, segmentor = load_models()
     file = st.file_uploader(TEXT[lang]["upload"], type=["jpg", "png"])
 
     if file is None:
-        st.info(TEXT[lang]["waiting"])
+        st.info(TEXT[lang]["wait"])
     else:
         slot = st.empty()
         slot.text(TEXT[lang]["analyzing"])
+
         pred_class, seg_image, img_bytes = predict_pipeline(file, classifier, segmentor)
         input_image = Image.open(BytesIO(img_bytes))
+
         col1, col2 = st.columns(2)
-        col1.image(input_image, caption="Ảnh gốc" if lang == "vi" else "Original Image", use_container_width=True)
-        col2.image(seg_image, caption="Kết quả phân đoạn (Đỏ: Ác tính, Xanh: Lành tính)" if lang == "vi" else "Segmentation Result (Red: Malignant, Green: Benign)", use_container_width=True)
+        col1.image(input_image, caption="Ảnh gốc", use_container_width=True)
+        col2.image(seg_image, caption="Kết quả phân đoạn (Đỏ: Ác tính, Xanh: Lành tính)", use_container_width=True)
 
         result_index = np.argmax(pred_class)
         result = ["benign", "malignant", "normal"][result_index]
-        st.markdown("---")
-        st.subheader("💡 Kết quả phân loại" if lang == "vi" else "💡 Classification Result")
-
-        st.success(TEXT[lang]["benign"]) if result == "benign" else (
-            st.error(TEXT[lang]["malignant"]) if result == "malignant" else st.info(TEXT[lang]["normal"])
-        )
 
         st.markdown("---")
-        st.subheader(TEXT[lang]["prob_title"])
+        st.subheader("💡 Kết quả phân loại")
+
+        if result == "benign":
+            st.success("🟢 Kết luận: Khối u lành tính.")
+        elif result == "malignant":
+            st.error("🔴 Kết luận: Ung thư vú ác tính.")
+        else:
+            st.info("⚪ Kết luận: Không phát hiện khối u (Bình thường).")
+
+        st.markdown("---")
+        st.subheader("📈 Chi tiết xác suất")
 
         chart_df = pd.DataFrame({
-            "Loại chẩn đoán" if lang == "vi" else "Diagnosis Type":
-                ["Lành tính", "Ác tính", "Bình thường"] if lang == "vi" else ["Benign", "Malignant", "Normal"],
-            "Xác suất (%)" if lang == "vi" else "Probability (%)":
-                [pred_class[0,0]*100, pred_class[0,1]*100, pred_class[0,2]*100]
+            "Loại chẩn đoán": ["Lành tính", "Ác tính", "Bình thường"],
+            "Xác suất (%)": [pred_class[0,0]*100, pred_class[0,1]*100, pred_class[0,2]*100]
         })
         chart = alt.Chart(chart_df).mark_bar().encode(
-            x=alt.X(chart_df.columns[0], sort=None),
-            y=alt.Y(chart_df.columns[1], scale=alt.Scale(domain=[0, 100])),
-            color=alt.Color(chart_df.columns[0], scale=alt.Scale(
-                domain=["Lành tính", "Ác tính", "Bình thường"] if lang == "vi" else ["Benign", "Malignant", "Normal"],
+            x=alt.X("Loại chẩn đoán", sort=None),
+            y=alt.Y("Xác suất (%)", scale=alt.Scale(domain=[0, 100])),
+            color=alt.Color("Loại chẩn đoán", scale=alt.Scale(
+                domain=["Lành tính", "Ác tính", "Bình thường"],
                 range=["#10B981", "#EF4444", "#9CA3AF"]
             )),
-            tooltip=list(chart_df.columns)
-        ).properties(title=TEXT[lang]["chart_title"])
+            tooltip=["Loại chẩn đoán", alt.Tooltip("Xác suất (%)", format=".15f")]
+        ).properties(title="Biểu đồ Xác suất Chẩn đoán")
         st.altair_chart(chart, use_container_width=True)
-        slot.success("✅ Hoàn tất chẩn đoán!" if lang == "vi" else "✅ Diagnosis complete!")
+        slot.success("✅ Hoàn tất chẩn đoán!")
