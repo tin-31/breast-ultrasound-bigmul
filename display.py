@@ -1,3 +1,7 @@
+# ==========================================
+# 🩺 Breast Ultrasound AI Diagnostic App (Fixed Model Loader)
+# ==========================================
+
 import os
 import gdown
 import streamlit as st
@@ -10,222 +14,261 @@ from io import BytesIO
 from tensorflow.keras.preprocessing.image import img_to_array
 from tensorflow.keras.applications.efficientnet import preprocess_input
 
-# =========================
-# 🔹 PAGE CONFIG
-# =========================
-st.set_page_config(page_title="Breast Ultrasound AI", layout="wide", page_icon="🩺")
+# ==============================
+# 🔹 Model configuration
+# ==============================
+# SEG_MODEL_ID MỚI đã được cập nhật từ link bạn gửi
+SEG_MODEL_ID = "1axOg7N5ssJrMec97eV-JMPzID26ynzN1" # ✅ Model phân đoạn (FIXED)
+CLF_MODEL_ID = "1fXPICuTkETep2oPiA56l0uMai2GusEJH" # ✅ Model phân loại
 
-# =========================
-# 🌐 LANGUAGE SWITCH
-# =========================
-if "lang" not in st.session_state:
-    st.session_state.lang = "vi"
-
-# CSS + HTML cho nút chuyển ngôn ngữ kiểu iOS
-st.markdown("""
-<style>
-#lang-toggle {
-  position: fixed;
-  top: 12px;
-  right: 110px;
-  width: 82px;
-  height: 36px;
-  background: linear-gradient(145deg, #222, #111);
-  border-radius: 50px;
-  border: 1px solid #444;
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0 8px;
-  cursor: pointer;
-  box-shadow: inset 0 2px 5px rgba(0,0,0,0.4);
-  transition: all 0.3s ease;
-  z-index: 9999;
-}
-#lang-toggle:hover {
-  transform: scale(1.05);
-  border-color: #777;
-}
-.flag {
-  font-size: 16px;
-  user-select: none;
-}
-.slider {
-  position: absolute;
-  top: 2px;
-  left: 3px;
-  width: 30px;
-  height: 30px;
-  background: linear-gradient(90deg, #3B82F6, #10B981);
-  border-radius: 50%;
-  transition: all 0.3s ease;
-  box-shadow: 0 2px 6px rgba(0,0,0,0.4);
-}
-#lang-toggle.en .slider {
-  left: 48px;
-}
-</style>
-
-<div id="lang-toggle" class="{cls}">
-  <span class="flag">🇻🇳</span>
-  <div class="slider"></div>
-  <span class="flag">🇺🇸</span>
-</div>
-
-<script>
-const root = window.parent.document;
-const toggle = root.querySelector('#lang-toggle');
-if (toggle) {
-  toggle.addEventListener('click', () => {
-    window.parent.postMessage({type: 'langToggle'}, '*');
-  });
-}
-</script>
-""".replace("{cls}", "en" if st.session_state.lang == "en" else ""), unsafe_allow_html=True)
-
-# Bắt sự kiện toggle
-from streamlit.runtime.scriptrunner import add_script_run_ctx
-import threading
-def toggle_lang():
-    st.session_state.lang = "en" if st.session_state.lang == "vi" else "vi"
-    st.rerun()
-
-st.experimental_get_query_params()  # Kích hoạt kênh JS listener
-
-# =========================
-# 🔹 MODELS CONFIG
-# =========================
-SEG_MODEL_ID = "1axOg7N5ssJrMec97eV-JMPzID26ynzN1"
-CLF_MODEL_ID = "1fXPICuTkETep2oPiA56l0uMai2GusEJH"
 SEG_MODEL_PATH = "seg_model.keras"
 CLF_MODEL_PATH = "clf_model.h5"
 
+# ==============================
+# 🔹 Custom Lambda Functions (Định nghĩa lại các hàm Lambda đã đặt tên trong CBAM)
+# ==============================
+def spatial_mean(t):
+    """Channel Average Pooling cho Spatial Attention."""
+    return tf.reduce_mean(t, axis=-1, keepdims=True)
+
+def spatial_max(t):
+    """Channel Max Pooling cho Spatial Attention."""
+    return tf.reduce_max(t, axis=-1, keepdims=True)
+
+def spatial_output_shape(s):
+    """Output shape (batch, height, width, 1) cho Spatial Attention."""
+    return (s[0], s[1], s[2], 1)
+
+# ==============================
+# 🔹 Auto download models
+# ==============================
 def download_model(model_id, output_path, model_name):
+    """Tự động tải model từ Google Drive nếu chưa tồn tại"""
     if not os.path.exists(output_path):
         st.info(f"📥 Đang tải {model_name} (ID: {model_id})...")
         gdown.download(f"https://drive.google.com/uc?id={model_id}", output_path, quiet=False)
-        st.success(f"✅ {model_name} đã tải xong!")
+        st.success(f"✅ {model_name} đã được tải xong!")
 
-download_model(SEG_MODEL_ID, SEG_MODEL_PATH, "Model phân đoạn")
-download_model(CLF_MODEL_ID, CLF_MODEL_PATH, "Model phân loại")
+download_model(SEG_MODEL_ID, SEG_MODEL_PATH, "model phân đoạn")
+download_model(CLF_MODEL_ID, CLF_MODEL_PATH, "model phân loại")
 
-# =========================
-# 🔹 LOAD MODELS
-# =========================
+# ==============================
+# 🔹 Load both models safely (FIXED: Sử dụng custom_objects)
+# ==============================
 @st.cache_resource
 def load_models():
+    # Khai báo các đối tượng tùy chỉnh (Lambda functions)
     CUSTOM_OBJECTS = {
-        "spatial_mean": lambda t: tf.reduce_mean(t, axis=-1, keepdims=True),
-        "spatial_max": lambda t: tf.reduce_max(t, axis=-1, keepdims=True),
-        "spatial_output_shape": lambda s: (s[0], s[1], s[2], 1)
+        "spatial_mean": spatial_mean,
+        "spatial_max": spatial_max,
+        "spatial_output_shape": spatial_output_shape
     }
-    from tensorflow import keras
-    try: keras.config.enable_unsafe_deserialization()
-    except: pass
-    clf = tf.keras.models.load_model(CLF_MODEL_PATH, compile=False)
-    seg = tf.keras.models.load_model(SEG_MODEL_PATH, custom_objects=CUSTOM_OBJECTS, compile=False)
-    return clf, seg
 
-# =========================
-# 🔹 FUNCTIONS
-# =========================
+    from tensorflow import keras
+    try:
+        # Cố gắng bật chế độ bỏ qua kiểm tra an toàn (nếu cần)
+        keras.config.enable_unsafe_deserialization()
+    except Exception:
+        pass
+
+    # Tải model phân loại
+    classifier = tf.keras.models.load_model(CLF_MODEL_PATH, compile=False)
+    
+    # Tải model phân đoạn với custom_objects để giải quyết lỗi Lambda Layer
+    segmentor = tf.keras.models.load_model(
+        SEG_MODEL_PATH, 
+        custom_objects=CUSTOM_OBJECTS,
+        compile=False
+    )
+    return classifier, segmentor
+
+# ==============================
+# 🔹 Image preprocessing
+# ==============================
 def classify_preprop(image_bytes):
-    img = Image.open(BytesIO(image_bytes)).convert("RGB").resize((224,224))
-    img = img_to_array(img)
-    img = np.expand_dims(img, axis=0)
-    return preprocess_input(img)
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    image = image.resize((224, 224))
+    image = img_to_array(image)
+    image = np.expand_dims(image, axis=0)
+    image = preprocess_input(image)
+    return image
 
 def segment_preprop(image_bytes):
-    img = Image.open(BytesIO(image_bytes)).convert("RGB").resize((256,256))
-    img = np.array(img)/255.0
-    return np.expand_dims(img, axis=0)
+    image = Image.open(BytesIO(image_bytes)).convert("RGB")
+    image = image.resize((256, 256))
+    image = np.array(image) / 255.0
+    image = np.expand_dims(image, axis=0)
+    return image
 
+# CẬP NHẬT: Hiển thị màu sắc theo yêu cầu mới: Đỏ (Ác tính), Xanh (Lành tính)
 def segment_postprop(image, mask, alpha=0.5):
-    original = np.squeeze(image[0])
+    """
+    Tạo lớp phủ màu sắc lên ảnh gốc dựa trên kết quả phân đoạn.
+    - Class 0 (Background/Normal): Giữ màu ảnh gốc
+    - Class 1 (Benign/Lành tính): Màu Xanh (Green: [0, 1, 0])
+    - Class 2 (Malignant/Ác tính): Màu Đỏ (Red: [1, 0, 0])
+    """
+    original_img = np.squeeze(image[0]) 
     mask_indices = np.argmax(mask, axis=-1)
-    COLOR_BENIGN = np.array([0.0, 1.0, 0.0])
-    COLOR_MALIGNANT = np.array([1.0, 0.0, 0.0])
-    color_map = np.zeros_like(original, dtype=np.float32)
+
+    # ĐỊNH NGHĨA MÀU SẮC MỚI
+    COLOR_BENIGN = np.array([0.0, 1.0, 0.0])    # Xanh lá (Lành tính)
+    COLOR_MALIGNANT = np.array([1.0, 0.0, 0.0]) # Đỏ (Ác tính)
+
+    color_map = np.zeros_like(original_img, dtype=np.float32)
+    
+    # Áp dụng màu cho Benign (1) và Malignant (2)
     color_map[mask_indices == 1] = COLOR_BENIGN
     color_map[mask_indices == 2] = COLOR_MALIGNANT
-    blended = original.copy()
-    blended[mask_indices>0] = (
-        original[mask_indices>0]*(1-alpha) + color_map[mask_indices>0]*alpha
+    
+    segmented_image = original_img.copy()
+    segment_locations = mask_indices > 0
+    
+    # Trộn màu (Blending) chỉ tại các vị trí khối u
+    segmented_image[segment_locations] = (
+        original_img[segment_locations] * (1 - alpha) + 
+        color_map[segment_locations] * alpha
     )
-    return blended
+    
+    return segmented_image
 
-def predict_pipeline(file, clf, seg):
-    bytes_img = file.read()
-    img_clf = classify_preprop(bytes_img)
-    img_seg = segment_preprop(bytes_img)
+# ==============================
+# 🔹 Prediction pipeline
+# ==============================
+def predict_pipeline(file, classifier, segmentor):
+    image_bytes = file.read()
+    img_clf = classify_preprop(image_bytes)
+    img_seg = segment_preprop(image_bytes)
+
+    # Sử dụng CPU để dự đoán
     with tf.device("/CPU:0"):
-        pred_class = clf.predict(img_clf, verbose=0)
-        pred_mask = seg.predict(img_seg, verbose=0)[0]
+        pred_class = classifier.predict(img_clf, verbose=0)
+        pred_mask = segmentor.predict(img_seg, verbose=0)[0]
+
     seg_image = segment_postprop(img_seg, pred_mask)
-    return pred_class, seg_image, bytes_img
+    return pred_class, seg_image, image_bytes
 
-# =========================
-# 🔹 UI
-# =========================
+# ==============================
+# 🔹 Streamlit UI
+# ==============================
+st.set_page_config(page_title="Breast Ultrasound AI", layout="wide", page_icon="🩺")
 st.sidebar.title("📘 Navigation")
-mode = st.sidebar.selectbox("Chọn trang", ["Ứng dụng chẩn đoán", "Thông tin chung", "Thống kê về dữ liệu huấn luyện"])
 
-if mode == "Ứng dụng chẩn đoán":
+app_mode = st.sidebar.selectbox(
+    "Chọn trang",
+    ["Ứng dụng chẩn đoán", "Thông tin chung", "Thống kê về dữ liệu huấn luyện"]
+)
+
+# -----------------------------
+# Trang thông tin
+# -----------------------------
+if app_mode == "Thông tin chung":
+    st.title("👨‍🎓 Giới thiệu về thành viên")
+    st.markdown("<h4>Lê Vũ Anh Tin - 11TH</h4>", unsafe_allow_html=True)
+    
+    try:
+        st.image("Tin.jpg", width=500)
+        st.markdown("<h4>Trường THPT Chuyên Nguyễn Du</h4>", unsafe_allow_html=True)
+        st.image("school.jpg", width=500)
+    except:
+        st.info("🖼️ Ảnh giới thiệu chưa được tải lên.")
+
+# -----------------------------
+# Trang thống kê dữ liệu
+# -----------------------------
+elif app_mode == "Thống kê về dữ liệu huấn luyện":
+    st.title("📊 Thống kê tổng quan về tập dữ liệu")
+    st.caption("""
+    Tập dữ liệu **Breast Ultrasound Images (BUI)** được kết hợp từ ba nguồn:
+    - BUSI (Arya Shah, Kaggle): ~780 ảnh siêu âm vú với mặt nạ phân đoạn (benign, malignant, normal).
+    - BUS-UCLM (Orvile, Kaggle): 683 ảnh siêu âm vú với mặt nạ phân đoạn (benign, malignant, normal).
+    - Breast Lesions USG (Cancer Imaging Archive): 163 trường hợp với ảnh siêu âm vú (DICOM) và chú thích tổn thương.
+    
+    Tổng cộng **1578 ảnh siêu âm vú** có mặt nạ phân đoạn tương ứng.
+    """)
+    st.markdown("""
+    ### 🔗 Nguồn dữ liệu và trích dẫn
+    Dữ liệu được thu thập từ các nguồn công khai sau, với trích dẫn theo định dạng APA:
+    
+    | Nguồn | Số lượng | Mô tả | Link | Trích dẫn |
+    |-------|----------|--------|------|-----------|
+    | BUSI (Arya Shah, Kaggle) | ~780 ảnh | Ảnh siêu âm vú với mặt nạ phân đoạn (benign, malignant, normal) | [Link](https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset/data) | Shah, A. (2020). Breast Ultrasound Images Dataset [Dataset]. Kaggle. https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset/data |
+    | BUS-UCLM (Orvile, Kaggle) | 683 ảnh | Ảnh siêu âm vú với mặt nạ phân đoạn (benign, malignant, normal) | [Link](https://www.kaggle.com/datasets/orvile/bus-uclm-breast-ultrasound-dataset) | Orvile. (2023). BUS-UCLM Breast Ultrasound Dataset [Dataset]. Kaggle. https://www.kaggle.com/datasets/orvile/bus-uclm-breast-ultrasound-dataset |
+    | Breast Lesions USG (Cancer Imaging Archive) | 163 trường hợp | Ảnh siêu âm vú (DICOM) với chú thích tổn thương | [Link](https://www.cancerimagingarchive.net/collection/breast-lesions-usg/) | The Cancer Imaging Archive (TCIA). (2021). Breast Lesions USG [Dataset]. Cancer Imaging Archive. https://www.cancerimagingarchive.net/collection/breast-lesions-usg/ |
+    
+    **Tổng số ảnh:** 1578 ảnh siêu âm vú với mặt nạ phân đoạn.
+    """)
+
+# -----------------------------
+# Trang ứng dụng chẩn đoán
+# -----------------------------
+elif app_mode == "Ứng dụng chẩn đoán":
     st.title("🩺 Ứng dụng chẩn đoán bệnh ung thư vú từ hình ảnh siêu âm")
-    clf, seg = load_models()
-    file = st.file_uploader("📤 Tải ảnh siêu âm (JPG hoặc PNG)", type=["jpg","png"])
+
+    # Tải mô hình đã fix
+    classifier, segmentor = load_models()
+    file = st.file_uploader("📤 Tải ảnh siêu âm (JPG hoặc PNG)", type=["jpg", "png"])
+
     if file is None:
         st.info("👆 Vui lòng tải ảnh lên để bắt đầu chẩn đoán.")
     else:
         slot = st.empty()
         slot.text("⏳ Đang phân tích ảnh...")
-        pred_class, seg_image, img_bytes = predict_pipeline(file, clf, seg)
-        input_img = Image.open(BytesIO(img_bytes))
+
+        pred_class, seg_image, img_bytes = predict_pipeline(file, classifier, segmentor)
+        input_image = Image.open(BytesIO(img_bytes))
+
         col1, col2 = st.columns(2)
-        with col1: st.image(input_img, caption="Ảnh gốc", use_container_width=True)
-        with col2: st.image(seg_image, caption="Ảnh phân đoạn (Đỏ: Ác tính, Xanh: Lành tính)", use_container_width=True)
-        result_idx = np.argmax(pred_class)
-        classes = ["benign","malignant","normal"]
-        result = classes[result_idx]
+        with col1:
+            st.image(input_image, caption="Ảnh gốc", use_container_width=True)
+        with col2:
+            # Tên chú thích được cập nhật
+            st.image(seg_image, caption="Kết quả phân đoạn (Đỏ: Ác tính, Xanh: Lành tính)", use_container_width=True)
+
+        class_names = ["benign", "malignant", "normal"]
+        # Phân loại là lành tính: index 0, ác tính: index 1, bình thường: index 2
+        result_index = np.argmax(pred_class)
+        result = class_names[result_index]
+        
         st.markdown("---")
         st.subheader("💡 Kết quả phân loại")
-        if result == "benign": st.success("🟢 Kết luận: Khối u lành tính.")
-        elif result == "malignant": st.error("🔴 Kết luận: Ung thư vú ác tính.")
-        else: st.info("⚪ Kết luận: Không phát hiện khối u.")
+
+        if result == "benign":
+            st.success("🟢 Kết luận: Khối u lành tính.")
+        elif result == "malignant":
+            st.error("🔴 Kết luận: Ung thư vú ác tính.")
+        else:
+            st.info("⚪ Kết luận: Không phát hiện khối u (Bình thường).")
+            
         st.markdown("---")
-        st.subheader("📈 Xác suất chi tiết")
-        df = pd.DataFrame({
-            "Loại": ["Lành tính","Ác tính","Bình thường"],
+        st.subheader("📈 Chi tiết xác suất")
+
+        # CẬP NHẬT: Hiển thị xác suất chi tiết nhất có thể (15 chữ số thập phân)
+        format_spec = ".15f" 
+        
+        # Đảm bảo thứ tự class_names khớp với thứ tự đầu ra của mô hình (benign, malignant, normal)
+        chart_df = pd.DataFrame({
+            "Loại chẩn đoán": ["Lành tính", "Ác tính", "Bình thường"],
             "Xác suất (%)": [pred_class[0,0]*100, pred_class[0,1]*100, pred_class[0,2]*100]
         })
-        chart = alt.Chart(df).mark_bar().encode(
-            x="Loại", y=alt.Y("Xác suất (%)", scale=alt.Scale(domain=[0,100])),
-            color=alt.Color("Loại", scale=alt.Scale(
-                domain=["Lành tính","Ác tính","Bình thường"],
-                range=["#10B981","#EF4444","#9CA3AF"]
-            ))
-        ).properties(title="Biểu đồ xác suất chẩn đoán")
+        chart = alt.Chart(chart_df).mark_bar().encode(
+            x=alt.X("Loại chẩn đoán", sort=None),
+            y=alt.Y("Xác suất (%)", scale=alt.Scale(domain=[0, 100])),
+            color=alt.Color("Loại chẩn đoán", scale=alt.Scale(
+                domain=["Lành tính", "Ác tính", "Bình thường"],
+                range=["#10B981", "#EF4444", "#9CA3AF"]
+            )),
+            # Cập nhật tooltip để hiển thị chi tiết
+            tooltip=["Loại chẩn đoán", alt.Tooltip("Xác suất (%)", format=format_spec)]
+        ).properties(
+            title="Biểu đồ Xác suất Chẩn đoán"
+        )
         st.altair_chart(chart, use_container_width=True)
+
+        st.markdown(f"""
+        - Xác suất bệnh nhân có khối u lành tính là: **{pred_class[0,0]*100:{format_spec}}%**
+        - Xác suất bệnh nhân mắc ung thư vú là: **{pred_class[0,1]*100:{format_spec}}%**
+        - Xác suất bệnh nhân khỏe mạnh là: **{pred_class[0,2]*100:{format_spec}}%**
+        """)
+
         slot.success("✅ Hoàn tất chẩn đoán!")
-
-elif mode == "Thông tin chung":
-    st.title("👨‍🎓 Giới thiệu thành viên")
-    st.markdown("<h4>Lê Vũ Anh Tin - 11TH</h4>", unsafe_allow_html=True)
-    st.image("Tin.jpg", width=500)
-    st.markdown("<h4>Trường THPT Chuyên Nguyễn Du</h4>", unsafe_allow_html=True)
-    st.image("school.jpg", width=500)
-
-elif mode == "Thống kê về dữ liệu huấn luyện":
-    st.title("📊 Thống kê tổng quan về tập dữ liệu huấn luyện")
-    data = pd.DataFrame({
-        "Loại ảnh": ["Benign","Malignant","Normal"],
-        "Số lượng": [437, 210, 133]
-    })
-    st.dataframe(data)
-    st.bar_chart(data.set_index("Loại ảnh"))
-    st.markdown("""
-    **Nguồn dữ liệu:** Breast Ultrasound Images Dataset (BUI).  
-    - Tổng số ảnh: **780**  
-    - Kích thước trung bình: 500×500 px  
-    - Dữ liệu đã được cân bằng và tiền xử lý trước khi huấn luyện mô hình.
-    """)
