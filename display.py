@@ -123,14 +123,14 @@ st.sidebar.title("📘 Danh mục")
 
 chon_trang = st.sidebar.selectbox(
     "Chọn nội dung hiển thị",
-    ["Giới thiệu", "Ứng dụng minh họa", "Nguồn dữ liệu & Bản quyền"]
+    ["Ứng dụng minh họa", "Giới thiệu", "Nguồn dữ liệu & Bản quyền"]
 )
 
 # -----------------------------
 # Trang Giới thiệu
 # -----------------------------
 if chon_trang == "Giới thiệu":
-    st.title("👩‍🔬 ỨNG DỤNG AI TRONG PHÂN TÍCH SIÊU ÂM VÚ")
+    st.title("👩‍🔬 ỨNG DỤNG AI TRONG HỖ TRỢ CHẨN ĐOÁN SIÊU ÂM VÚ")
     st.markdown("""
     Dự án này được thực hiện với mục đích **nghiên cứu học thuật** trong lĩnh vực Trí tuệ nhân tạo và Y học hình ảnh.
 
