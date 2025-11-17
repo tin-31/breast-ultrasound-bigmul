@@ -181,8 +181,8 @@ def make_gradcam_heatmap(img_for_cls, model, class_index=None, last_conv_layer_n
     """
     img_for_cls: (1,224,224,3) preprocessed
     model: classifier
-    class_index: int or None (auto argmax)
-    returns heatmap normalized [0..1] (H,W)
+    class_index: int hoặc None (tự argmax)
+    returns heatmap [0..1] (H,W)
     """
     last_conv_layer_name = last_conv_layer_name or _find_last_conv_layer(model)
     if last_conv_layer_name is None:
@@ -214,13 +214,13 @@ def make_gradcam_heatmap(img_for_cls, model, class_index=None, last_conv_layer_n
     return heatmap.numpy()
 
 def overlay_gradcam_on_pil(pil_img, heatmap, alpha=0.35, colormap="jet"):
-    # heatmap: [H,W] (0..1), pil_img size matches, else resize
+    # heatmap: [H,W] (0..1)
     hm_img = Image.fromarray(np.uint8(255*heatmap)).resize(pil_img.size, Image.BILINEAR)
     hm_arr = np.asarray(hm_img)/255.0  # 0..1
     cmap = mpl_cm.get_cmap(colormap)
     colored = (cmap(hm_arr)[...,:3]*255).astype(np.uint8)
     overlay = Image.fromarray(colored).convert("RGBA")
-    # alpha by heatmap
+    # alpha theo heat
     alpha_mask = Image.fromarray((hm_arr*255).astype(np.uint8)).convert("L")
     overlay.putalpha(alpha_mask)
     base = pil_img.convert("RGBA")
@@ -405,15 +405,20 @@ elif chon_trang == "Ứng dụng minh họa":
             with gr:
                 st.write(f"**p_img (ác tính, từ ảnh)** = `{p_img_malig:.3f}`")
                 st.write(f"**p_final (ác tính, sau hợp nhất)** = **`{p_final:.3f}`**  (~ {p_final*100:.1f}%)")
+                # 🔧 SỬA LỖI: dùng tên cột ASCII để tránh SyntaxError
                 df_contrib = pd.DataFrame({
-                    "Thành phần":["Ảnh (logit)","Lâm sàng (w*risk_z)","Diện tích (w*area_z)","Kích thước (w*size_z)"],
-                    "Đóng góp":[contrib["image_logit"], contrib["risk_term"], contrib["area_term"], contrib["size_term"]]
+                    "component": ["Ảnh (logit)","Lâm sàng (w*risk_z)","Diện tích (w*area_z)","Kích thước (w*size_z)"],
+                    "contrib_logit": [contrib["image_logit"], contrib["risk_term"], contrib["area_term"], contrib["size_term"]]
                 })
+                # Bar chart đóng góp (không còn alt.datum.<tên có dấu>)
+                y_min = min(-2.0, float(df_contrib["contrib_logit"].min()) - 0.2)
+                y_max = max( 2.0, float(df_contrib["contrib_logit"].max()) + 0.2)
                 bar_contrib = alt.Chart(df_contrib).mark_bar().encode(
-                    x=alt.X("Thành phần", sort=None),
-                    y=alt.Y("Đóng góp", scale=alt.Scale(domain=[min(-2, min(df_contrib["Đóng góp"])-0.2),
-                                                                max( 2, max(df_contrib["Đóng góp"])+0.2)])),
-                    color=alt.condition(alt.datum.Đóng góp>0, alt.value("#10B981"), alt.value("#EF4444"))
+                    x=alt.X("component:N", sort=None, title="Thành phần"),
+                    y=alt.Y("contrib_logit:Q", scale=alt.Scale(domain=[y_min, y_max]), title="Đóng góp vào logit"),
+                    color=alt.condition("datum.contrib_logit > 0", alt.value("#10B981"), alt.value("#EF4444")),
+                    tooltip=[alt.Tooltip("component:N", title="Thành phần"),
+                             alt.Tooltip("contrib_logit:Q", title="Đóng góp", format=".3f")]
                 ).properties(height=220)
                 st.altair_chart(bar_contrib, use_container_width=True)
                 st.caption("Các cột biểu diễn mức đóng góp (+/−) vào logit trước khi chuyển thành xác suất.")
