@@ -11,7 +11,7 @@ import tensorflow as tf
 import numpy as np
 import pandas as pd
 import altair as alt
-from PIL import Image, ImageDraw, ImageOps
+from PIL import Image
 from io import BytesIO
 from tensorflow.keras.preprocessing.image import img_to_array
 from tensorflow.keras.applications.efficientnet import preprocess_input
@@ -162,81 +162,53 @@ def combine_probabilities_rule_based(p_img_malignant, risk_points, mask_feats,
     return p_final, contrib
 
 # ==============================
-# ⭐ NEW: Explainable AI (Grad‑CAM & Malignant heatmap)
-# ==============================
-def find_last_conv_layer_name(model):
-    for layer in reversed(model.layers):
-        if isinstance(layer, (tf.keras.layers.Conv2D,
-                              tf.keras.layers.SeparableConv2D,
-                              tf.keras.layers.DepthwiseConv2D)):
-            return layer.name
-    return None
-
-def gradcam_overlay(model, x_preprocessed_224, base_pil_224, class_index=MALIGNANT_INDEX, alpha=0.55):
-    """Tạo Grad‑CAM overlay cho lớp class_index."""
-    last_conv = find_last_conv_layer_name(model)
-    if last_conv is None:
-        return base_pil_224  # fallback
-    grad_model = tf.keras.models.Model([model.inputs],
-                                       [model.get_layer(last_conv).output, model.output])
-    with tf.GradientTape() as tape:
-        conv_out, preds = grad_model(x_preprocessed_224)
-        loss = preds[:, class_index]
-    grads = tape.gradient(loss, conv_out)                   # (1,H,W,C)
-    pooled = tf.reduce_mean(grads, axis=(0,1,2))            # (C,)
-    conv_out = conv_out[0]                                  # (H,W,C)
-    heatmap = tf.reduce_sum(tf.multiply(pooled, conv_out), axis=-1)
-    heatmap = tf.maximum(heatmap, 0) / (tf.reduce_max(heatmap) + 1e-6)
-    heat = heatmap.numpy()
-
-    # overlay (đỏ) theo alpha từ heat
-    heat_L = Image.fromarray(np.uint8(255*heat)).resize(base_pil_224.size, Image.BILINEAR)
-    overlay = Image.new("RGBA", base_pil_224.size, (255,0,0,0))
-    overlay.putalpha(heat_L)  # alpha theo mức nóng
-    base = base_pil_224.convert("RGBA")
-    out = Image.alpha_composite(base, overlay).convert("RGB")
-    return out
-
-def malignant_prob_overlay_from_seg(base_pil_256, p_malig_map, alpha=0.65):
-    """Heatmap xác suất ác tính từ phân đoạn (đỏ)."""
-    heat = (np.clip(p_malig_map, 0, 1)*255).astype(np.uint8)
-    heat_img = Image.fromarray(heat).resize(base_pil_256.size, Image.BILINEAR)
-    overlay = Image.new("RGBA", base_pil_256.size, (255,0,0,0))
-    overlay.putalpha(heat_img)
-    out = Image.alpha_composite(base_pil_256.convert("RGBA"), overlay).convert("RGB")
-    return out
-
-# ==============================
 # ⭐ NEW: Biểu đồ & Gauge
 # ==============================
 def prob_bar_chart(p_vec):
+    """Cột xác suất theo 3 lớp với màu dễ đọc trên nền tối."""
     df = pd.DataFrame({"Lớp":["Bình thường","Lành tính","Ác tính"],
                        "Xác suất":[float(p_vec[2]), float(p_vec[0]), float(p_vec[1])]})
-    return alt.Chart(df).mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4).encode(
-        x=alt.X("Lớp", sort=["Bình thường","Lành tính","Ác tính"]),
-        y=alt.Y("Xác suất", scale=alt.Scale(domain=[0,1])),
-        color=alt.Color("Lớp", scale=alt.Scale(range=["#9CA3AF","#10B981","#EF4444"])),
-        tooltip=["Lớp","Xác suất"]
-    ).properties(height=240)
+    chart = (
+        alt.Chart(df, background=None)
+        .mark_bar(cornerRadiusTopLeft=4, cornerRadiusTopRight=4)
+        .encode(
+            x=alt.X("Lớp:N", sort=["Bình thường","Lành tính","Ác tính"], title=None),
+            y=alt.Y("Xác suất:Q", scale=alt.Scale(domain=[0,1]), title="Xác suất"),
+            color=alt.Color("Lớp:N", scale=alt.Scale(range=["#9CA3AF","#10B981","#EF4444"]), legend=None),
+            tooltip=[alt.Tooltip("Lớp:N"), alt.Tooltip("Xác suất:Q", format=".3f")]
+        )
+        .properties(height=240)
+        .configure_axis(labelColor="#e5e7eb", titleColor="#e5e7eb")
+        .configure_view(strokeWidth=0)
+    )
+    return chart
 
 def gauge_chart(p_final):
-    """Donut gauge Altair"""
+    """Donut gauge Altair (chữ trắng, caption xám để nổi bật trên nền tối)."""
     value = float(np.clip(p_final,0,1))
     df = pd.DataFrame({
         "label":["p_final","remainder"],
         "value":[value, 1-value],
-        "color":["#DC2626","#E5E7EB"]  # đỏ & xám nhạt
+        "color":["#DC2626","#374151"]  # đỏ & xám đậm
     })
-    ring = alt.Chart(df).mark_arc(outerRadius=110, innerRadius=70).encode(
-        theta="value",
-        color=alt.Color("color:N", scale=None, legend=None)
-    )
-    # Text trung tâm
-    center = alt.Chart(pd.DataFrame({"text":[f"{value*100:.1f}%"]})).mark_text(size=28, fontWeight="bold").encode(
-        text="text:N"
-    )
-    caption = alt.Chart(pd.DataFrame({"text":["Xác suất ác tính (kết hợp)"]})).mark_text(y=140, size=12).encode(text="text:N")
-    return (ring + center + caption).properties(width=260, height=260)
+    ring = alt.Chart(df, background=None).mark_arc(outerRadius=110, innerRadius=70).encode(
+        theta="value:Q", color=alt.Color("color:N", scale=None, legend=None)
+    ).properties(width=260, height=260)
+
+    # chữ giữa: 2 lớp (stroke đen + chữ trắng) để luôn rõ
+    center_stroke = alt.Chart(pd.DataFrame({"t":[f"{value*100:.1f}%"]})).mark_text(
+        size=30, fontWeight="bold", color="#111827", stroke="#111827", strokeWidth=2
+    ).encode(text="t:N")
+
+    center_text = alt.Chart(pd.DataFrame({"t":[f"{value*100:.1f}%"]})).mark_text(
+        size=30, fontWeight="bold", color="#FFFFFF"
+    ).encode(text="t:N")
+
+    caption = alt.Chart(pd.DataFrame({"t":["Xác suất ác tính (kết hợp)"]})).mark_text(
+        y=140, size=12, color="#9CA3AF"
+    ).encode(text="t:N")
+
+    return ring + center_stroke + center_text + caption
 
 # ==============================
 # 🔹 Pipeline dự đoán
@@ -259,8 +231,8 @@ def du_doan(file, classifier, segmentor):
 st.set_page_config(page_title="AI Phân tích Siêu âm Vú", layout="wide", page_icon="🩺")
 st.markdown("""
 <style>
-.big-title {font-size:1.6rem; font-weight:700;}
-.card {background:#0f172a; border:1px solid #1f2937; padding:1rem; border-radius:12px;}
+.big-title {font-size:1.6rem; font-weight:700; color:#e5e7eb;}
+.card {background:#0f172a; border:1px solid #1f2937; padding:1rem; border-radius:12px; color:#e5e7eb;}
 .metric {font-size:1.6rem; font-weight:700;}
 .caption {color:#9CA3AF;}
 </style>
@@ -274,12 +246,10 @@ chon_trang = st.sidebar.selectbox("Chọn nội dung hiển thị", ["Ứng dụ
 # -----------------------------
 if chon_trang == "Giới thiệu":
     st.title("👩‍🔬 ỨNG DỤNG AI TRONG HỖ TRỢ CHẨN ĐOÁN SIÊU ÂM VÚ")
-    st.markdown("""
-    Ứng dụng này phục vụ **nghiên cứu học thuật**; không dùng cho chẩn đoán y tế thực tế.
-    """)
+    st.markdown("Ứng dụng này phục vụ **nghiên cứu học thuật**; không dùng cho chẩn đoán y tế thực tế.")
 
 # -----------------------------
-# Trang minh họa (nâng cấp UI + XAI + gauge)
+# Trang minh họa (softmax + gauge, KHÔNG có XAI)
 # -----------------------------
 elif chon_trang == "Ứng dụng minh họa":
     st.title("🩺 Minh họa mô hình AI trên ảnh siêu âm vú (kết hợp thông tin lâm sàng)")
@@ -381,31 +351,33 @@ elif chon_trang == "Ứng dụng minh họa":
             with gL:
                 st.altair_chart(gauge_chart(p_final), use_container_width=False)
             with gR:
-                st.write(f"**p_img (ác tính, từ ảnh)** = `{p_img_malig:.3f}`")
-                st.write(f"**p_final (ác tính, sau hợp nhất)** = **`{p_final:.3f}`**  (~ {p_final*100:.1f}%)")
+                # dùng HTML để chắc chắn chữ sáng trên nền tối
+                st.markdown(f"<span style='color:#e5e7eb'>**p_img (ác tính, từ ảnh)** = `{p_img_malig:.3f}`</span>", unsafe_allow_html=True)
+                st.markdown(f"<span style='color:#e5e7eb'>**p_final (ác tính, sau hợp nhất)** = **`{p_final:.3f}`**  (~ {p_final*100:.1f}%)</span>", unsafe_allow_html=True)
 
-                # Giải thích định lượng đóng góp
+                # Giải thích định lượng đóng góp (ASCII field names để tránh lỗi)
                 df_contrib = pd.DataFrame({
-                    "Thành phần": ["Ảnh (logit)", "Lâm sàng (w*risk_z)", "Diện tích (w*area_z)", "Kích thước (w*size_z)"],
-                    "Đóng góp vào logit": [contrib["image_logit"], contrib["risk_term"], contrib["area_term"], contrib["size_term"]]
+                    "component": ["Ảnh (logit)", "Lâm sàng (w*risk_z)", "Diện tích (w*area_z)", "Kích thước (w*size_z)"],
+                    "contrib_logit": [contrib["image_logit"], contrib["risk_term"], contrib["area_term"], contrib["size_term"]]
                 })
-                bar_contrib = alt.Chart(df_contrib).mark_bar().encode(
-                    x=alt.X("Thành phần", sort=None),
-                    y=alt.Y("Đóng góp vào logit", scale=alt.Scale(domain=[min(-2,df_contrib["Đóng góp vào logit"].min()-0.2),
-                                                                          max( 2,df_contrib["Đóng góp vào logit"].max()+0.2)])),
-                    color=alt.condition("datum['Đóng góp vào logit']>0",
-                                        alt.value("#10B981"), alt.value("#EF4444"))
-                ).properties(height=220)
+                y_min = min(-2.0, float(df_contrib["contrib_logit"].min()) - 0.2)
+                y_max = max( 2.0, float(df_contrib["contrib_logit"].max()) + 0.2)
+                bar_contrib = (
+                    alt.Chart(df_contrib, background=None)
+                    .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
+                    .encode(
+                        x=alt.X("component:N", sort=None, title="Thành phần"),
+                        y=alt.Y("contrib_logit:Q", scale=alt.Scale(domain=[y_min, y_max]), title="Đóng góp vào logit"),
+                        color=alt.condition("datum.contrib_logit > 0", alt.value("#10B981"), alt.value("#EF4444")),
+                        tooltip=[alt.Tooltip("component:N", title="Thành phần"),
+                                 alt.Tooltip("contrib_logit:Q", title="Đóng góp", format=".3f")]
+                    )
+                    .properties(height=220)
+                    .configure_axis(labelColor="#e5e7eb", titleColor="#e5e7eb")
+                    .configure_view(strokeWidth=0)
+                )
                 st.altair_chart(bar_contrib, use_container_width=True)
                 st.caption("Các cột thể hiện mức đóng góp (+/−) của từng nguồn thông tin vào **logit** trước khi chuyển sang xác suất.")
-
-            # ====== XAI: GRAD‑CAM & MALIGNANT HEATMAP ======
-            st.markdown("<div class='big-title'>🧠 Explainable AI</div>", unsafe_allow_html=True)
-            cam = gradcam_overlay(classifier, x_cls, pil224, class_index=MALIGNANT_INDEX)
-            malig_heat = malignant_prob_overlay_from_seg(pil256, p_malig_map)
-            e1,e2 = st.columns(2)
-            e1.image(cam, caption="Grad‑CAM (đỏ = vùng ảnh ảnh hưởng mạnh tới dự đoán ác tính)", use_container_width=True)
-            e2.image(malig_heat, caption="Heatmap xác suất ác tính từ phân đoạn (đỏ = xác suất cao)", use_container_width=True)
 
             # ====== KHUYẾN NGHỊ ======
             if p_final >= 0.85 or mask_feats["approx_diam_px"] >= 48:
