@@ -1,270 +1,238 @@
+import streamlit as st
 import os
 import gdown
-import joblib
-import streamlit as st
-import tensorflow as tf
 import numpy as np
 import pandas as pd
 import cv2
+import joblib
+import keras  # Keras 3.4.1 (with TensorFlow 2.16.1 backend) for model loading
+# (Ensure scikit-learn 1.2.2 is installed for unpickling the classifier model.)
 
-# ==============================
-# 🔹 Hàm xử lý trung gian cho CBAM (GIỐNG CODE CŨ)
-# ==============================
-def spatial_mean(t):
-    return tf.reduce_mean(t, axis=-1, keepdims=True)
+# --- 1. Download model files from Google Drive if not already present ---
+# Create a directory for models
+MODEL_DIR = "models"
+os.makedirs(MODEL_DIR, exist_ok=True)
 
-def spatial_max(t):
-    return tf.reduce_max(t, axis=-1, keepdims=True)
-
-def spatial_output_shape(s):
-    return (s[0], s[1], s[2], 1)
-
-CUSTOM_OBJECTS = {
-    "spatial_mean": spatial_mean,
-    "spatial_max": spatial_max,
-    "spatial_output_shape": spatial_output_shape,
+# Google Drive file IDs for the large files
+drive_files = {
+    "Classifier_model_2.h5": "1fXPICuTkETep2oPiA56l0uMai2GusEJH",
+    "best_model_cbam_attention_unet_fixed.keras": "1axOg7N5ssJrMec97eV-JMPzID26ynzN1",
+    "clinical_epic_gb_model.pkl": "1z1wHVy9xyRXlRqxI8lYXMJhaJaUcKXnu",
+    "clinical_epic_gb_metadata.pkl": "1WWlfeRqr99VL4nBQ-7eEptIxitKtXj6V"
 }
 
-# Bật unsafe_deserialization giống code cũ (nếu Keras cho phép)
-try:
-    from tensorflow import keras
-    keras.config.enable_unsafe_deserialization()
-except Exception:
-    pass
+# Download each file if not already in MODEL_DIR
+with st.spinner("Downloading model files (if not already cached)..."):
+    for filename, file_id in drive_files.items():
+        dest_path = os.path.join(MODEL_DIR, filename)
+        if not os.path.exists(dest_path):
+            # Construct the gdown URL and download
+            url = f"https://drive.google.com/uc?id={file_id}"
+            gdown.download(url, dest_path, quiet=False)
+# Files will be downloaded only once. Subsequent runs will skip this.
 
-# ==============================
-# 🔹 Đường dẫn model & dữ liệu
-# ==============================
-seg_model_path = "seg_model.keras"
-class_model_path = "clf_model.h5"
-class_names_path = "class_names.npy"
-clinical_model_path = "clinical_epic_gb_model.pkl"
-clinical_metadata_path = "clinical_epic_gb_metadata.pkl"
-data_path = "Breast_Cancer_METABRIC_Epic_Hospital.csv"
+# --- 2. Load models and metadata (with caching to avoid re-loading on each run) ---
+@st.cache_resource  # Cache the loaded models across runs (Streamlit v1.18+)
+def load_models():
+    # Load the CBAM U-Net segmentation model
+    seg_model = keras.models.load_model(
+        os.path.join(MODEL_DIR, "best_model_cbam_attention_unet_fixed.keras"), 
+        compile=False  # no need to compile for inference
+    )
+    # Load the ultrasound image classification model
+    class_model = keras.models.load_model(
+        os.path.join(MODEL_DIR, "Classifier_model_2.h5"), 
+        compile=False
+    )
+    # Load the clinical gradient boosting model and metadata
+    gb_model = joblib.load(os.path.join(MODEL_DIR, "clinical_epic_gb_model.pkl"))
+    gb_meta = joblib.load(os.path.join(MODEL_DIR, "clinical_epic_gb_metadata.pkl"))
+    return seg_model, class_model, gb_model, gb_meta
 
-# Google Drive IDs
-seg_model_id = "1axOg7N5ssJrMec97eV-JMPzID26ynzN1"
-class_model_id = "1fXPICuTkETep2oPiA56l0uMai2GusEJH"
-clinical_model_id = "1z1wHVy9xyRXlRqxI8lYXMJhaJaUcKXnu"
-clinical_metadata_id = "1WWlfeRqr99VL4nBQ-7eEptIxitKtXj6V"
+# Load all models (this will run only once thanks to caching)
+seg_model, class_model, gb_model, gb_meta = load_models()
 
-# ==============================
-# 🔹 Hàm tải file từ Google Drive
-# ==============================
-def ensure_download(file_id, output_path, description):
-    """Download file from Google Drive by ID to the specified output path.
-       Returns True if file exists or downloaded successfully, False if failed."""
-    if os.path.exists(output_path):
-        return True
-    try:
-        st.info(f"Đang tải {description} từ Google Drive...")
-        # dùng dạng id= giống code mới
-        gdown.download(id=file_id, output=output_path, quiet=False)
-    except Exception as e:
-        st.error(f"Không thể tải {description}. Kiểm tra kết nối và quyền truy cập. Lỗi: {e}")
-        return False
-    if not os.path.exists(output_path):
-        st.error(f"Tải {description} thất bại, ứng dụng sẽ dừng.")
-        return False
-    return True
+# Extract metadata for clinical features
+feature_names = gb_meta["feature_names"]    # list of all feature column names used in the model
+num_cols     = gb_meta["num_cols"]          # original numerical columns
+cat_cols     = gb_meta["cat_cols"]          # original categorical columns
+label_map    = gb_meta["label_map"]         # {'Living': 0, 'Deceased': 1}
 
-# ==============================
-# 🔹 Tải các file mô hình
-# ==============================
-if not ensure_download(seg_model_id, seg_model_path, "mô hình phân đoạn ảnh"):
-    st.stop()
-if not ensure_download(class_model_id, class_model_path, "mô hình phân loại ảnh"):
-    st.stop()
-if not ensure_download(clinical_model_id, clinical_model_path, "mô hình lâm sàng"):
-    st.stop()
-if not ensure_download(clinical_metadata_id, clinical_metadata_path, "siêu dữ liệu mô hình lâm sàng"):
-    st.stop()
+# Prepare inverse label map for output
+inv_label_map = {v: k for k, v in label_map.items()}
 
-# ==============================
-# 🔹 Load mô hình ảnh (DÙNG custom_objects GIỐNG CODE CŨ)
-# ==============================
-@st.cache_resource
-def load_image_models():
-    try:
-        seg_model = tf.keras.models.load_model(
-            seg_model_path,
-            custom_objects=CUSTOM_OBJECTS,
-            compile=False,
-        )
-        class_model = tf.keras.models.load_model(
-            class_model_path,
-            compile=False,
-        )
-    except Exception as e:
-        st.error(f"Lỗi khi tải các mô hình ảnh: {e}")
-        st.stop()
-    return seg_model, class_model
+# --- 3. Set up Streamlit app UI ---
+st.title("Breast Cancer Prediction App")
+st.markdown("This web application allows you to analyze a breast ultrasound image (for tumor segmentation and classification) and input clinical data to predict patient survival. The models will run with the specified versions of TensorFlow/Keras, and all necessary files will be downloaded automatically using **gdown**.")
 
-seg_model, class_model = load_image_models()
+# Create two tabs: one for Image Analysis, one for Clinical Prediction
+tab1, tab2 = st.tabs(["🔎 Ultrasound Image Analysis", "📊 Clinical Survival Prediction"])
 
-# ==============================
-# 🔹 Load class names
-# ==============================
-try:
-    class_names = np.load(class_names_path)
-except Exception:
-    class_names = np.array(["Bình thường", "Lành tính", "Ác tính"])
-
-# ==============================
-# 🔹 Load mô hình lâm sàng & metadata
-# ==============================
-try:
-    clinical_model = joblib.load(clinical_model_path)
-    clinical_metadata = joblib.load(clinical_metadata_path)
-except Exception as e:
-    st.error(f"Lỗi khi tải mô hình lâm sàng: {e}")
-    st.stop()
-
-# ==============================
-# 🔹 Load CSV lâm sàng
-# ==============================
-df = None
-if os.path.exists(data_path):
-    try:
-        df = pd.read_csv(data_path)
-    except Exception as e:
-        st.warning(f"Không thể đọc dữ liệu lâm sàng: {e}")
-
-# ==============================
-# 🔹 Giao diện chính
-# ==============================
-st.title("Hệ thống chẩn đoán ung thư vú thông minh")
-st.write("""
-Tải ảnh siêu âm vú để hệ thống xác định vị trí khối u và phân loại 
-khối u đó là **lành tính**, **ác tính** hoặc **bình thường**.
-""")
-
-# ==============================
-# 🔹 Phần xử lý ảnh
-# ==============================
-uploaded_file = st.file_uploader("Chọn ảnh siêu âm (định dạng JPG/PNG)", type=["jpg", "png"])
-if uploaded_file is not None:
-    file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
-    image = cv2.imdecode(file_bytes, cv2.IMREAD_COLOR)
-    if image is None:
-        st.error("Không thể đọc ảnh. Hãy thử lại với tệp hình ảnh hợp lệ.")
+# Tab 1: Ultrasound image segmentation and classification
+with tab1:
+    st.header("Ultrasound Image Analysis")
+    st.write("Upload a breast ultrasound image. The app will segment the tumor (if present) and classify the lesion as benign, malignant, or normal.")
+    
+    # File uploader for ultrasound image
+    uploaded_file = st.file_uploader("Choose an ultrasound image file (PNG or JPG)", type=["png", "jpg", "jpeg"])
+    
+    if uploaded_file is not None:
+        # Read image data from the uploaded file
+        file_bytes = np.frombuffer(uploaded_file.read(), np.uint8)
+        img = cv2.imdecode(file_bytes, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            st.error("Could not read the image. Please upload a valid image file.")
+        else:
+            # Preprocess the image: normalize intensity and resize to 256x256
+            img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            orig_shape = img.shape  # original image shape (h, w)
+            img_resized = cv2.resize(img, (256, 256), interpolation=cv2.INTER_LINEAR)
+            
+            # Prepare image for models
+            # Segmentation model expects shape (1, 256, 256, 1) with intensity 0-255
+            img_for_seg = img_resized.astype(np.float32)
+            img_for_seg = np.expand_dims(img_for_seg, axis=(0, -1))  # add batch and channel dims
+            
+            # Classification model expects shape (1, 256, 256, 3).
+            # Convert grayscale to 3-channel (RGB) and cast to float32.
+            img_rgb = cv2.cvtColor(img_resized, cv2.COLOR_GRAY2RGB).astype(np.float32)
+            img_for_class = np.expand_dims(img_rgb, axis=0)  # shape (1,256,256,3)
+            # (The EfficientNetV2 model has preprocessing included; the pixel values 0-255 float are acceptable.)
+            
+            # Run the segmentation model to get mask prediction
+            mask_pred = seg_model.predict(img_for_seg)[0]  # shape (256,256,1)
+            mask_pred = mask_pred[..., 0]  # reshape to (256,256)
+            # Threshold the predicted mask (assuming binary segmentation with sigmoid output)
+            mask_bin = (mask_pred >= 0.5).astype(np.uint8)
+            
+            # Create an overlay of the mask on the image for visualization
+            base_img = np.stack([img_resized]*3, axis=-1)  # make 3-channel grayscale image for display
+            mask_color = np.zeros_like(base_img)
+            # Mark mask area in red color
+            mask_color[:, :, 0] = mask_bin * 255  # Red channel
+            mask_color[:, :, 1] = 0               # Green channel
+            mask_color[:, :, 2] = 0               # Blue channel
+            alpha = 0.4  # transparency for mask overlay
+            overlay_img = cv2.addWeighted(base_img, 1-alpha, mask_color, alpha, 0)
+            
+            # Run the classification model to predict benign/malignant/normal
+            class_probs = class_model.predict(img_for_class)[0]  # prediction probabilities for 3 classes
+            class_names = ['benign', 'malignant', 'normal']      # class order as per training
+            pred_idx = int(np.argmax(class_probs))
+            pred_label = class_names[pred_idx]
+            
+            # Display results
+            col1, col2 = st.columns(2)
+            with col1:
+                st.image(base_img, caption="Original Image (rescaled to 256x256)", use_column_width=True)
+            with col2:
+                st.image(overlay_img, caption="Tumor Segmentation Overlay", use_column_width=True)
+            
+            st.write(f"**Classification Result:** The model predicts this lesion is **{pred_label.upper()}**.")
+            # Show probabilities for each class in a bar chart
+            prob_percent = (class_probs * 100).round(2)
+            probs_df = pd.DataFrame({
+                'Category': ['Benign', 'Malignant', 'Normal'],
+                'Probability (%)': prob_percent
+            })
+            st.altair_chart(
+                alt.Chart(probs_df).mark_bar(color='#4E79A7').encode(
+                    x=alt.X('Category', sort=None), 
+                    y=alt.Y('Probability (%)', scale=alt.Scale(domain=[0,100]))
+                ),
+                use_container_width=True
+            )
+            st.caption("Predicted probability for each class (benign vs malignant vs normal).")
     else:
-        orig_image = image.copy()
-        orig_height, orig_width = orig_image.shape[0], orig_image.shape[1]
-
-        # ---- Phân đoạn (U-Net xám) ----
-        gray_image = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-        seg_height, seg_width = seg_model.input_shape[1], seg_model.input_shape[2]
-        resized_gray = cv2.resize(gray_image, (seg_width, seg_height))
-        input_seg = np.expand_dims(resized_gray, axis=(0, -1))  # (1, H, W, 1)
-
-        pred_mask = seg_model.predict(input_seg)[0]
-        mask = (pred_mask.squeeze() >= 0.5).astype(np.uint8)
-        mask_full_size = cv2.resize(mask, (orig_width, orig_height), interpolation=cv2.INTER_NEAREST)
-
-        overlay_image = orig_image.copy()
-        contours, _ = cv2.findContours(mask_full_size, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(overlay_image, contours, -1, (0, 255, 255), 2)  # vàng
-
-        # ---- Phân loại (ResNet / model RGB 224x224) ----
-        class_height, class_width = class_model.input_shape[1], class_model.input_shape[2]
-        resized_img = cv2.resize(orig_image, (class_width, class_height))
-        img_rgb = cv2.cvtColor(resized_img, cv2.COLOR_BGR2RGB)
-        img_array = img_rgb.astype(np.float32)
-        img_array = img_array / 127.5 - 1.0  # scale -1..1
-        img_array = np.expand_dims(img_array, axis=0)
-
-        pred_logits = class_model.predict(img_array)
-        pred_probs = tf.nn.softmax(pred_logits[0]).numpy()
-        class_idx = int(np.argmax(pred_probs))
-        class_label = class_names[class_idx] if class_idx < len(class_names) else str(class_idx)
-        confidence = float(np.max(pred_probs))
-
-        col1, col2 = st.columns([1, 1])
-        with col1:
-            st.subheader("Kết quả từ ảnh siêu âm")
-            st.write(f"**Chẩn đoán:** {class_label}")
-            st.write(f"**Xác suất dự đoán:** {confidence*100:.2f}%")
-        with col2:
-            overlay_rgb = cv2.cvtColor(overlay_image, cv2.COLOR_BGR2RGB)
-            st.image(overlay_rgb, caption="Ảnh siêu âm với vùng khối u được đánh dấu", use_column_width=True)
-
-# ==============================
-# 🔹 Phần mô hình lâm sàng METABRIC
-# ==============================
-if df is not None and 'clinical_model' in locals():
-    st.markdown("---")
-    st.header("Dự đoán tiên lượng lâm sàng (METABRIC)")
-    st.write("Chọn một bệnh nhân từ bộ dữ liệu METABRIC để dự đoán khả năng sống sót:")
-
-    patient_ids = df["Patient ID"].unique().tolist()
-    selected_id = st.selectbox("Mã bệnh nhân:", patient_ids)
-
-    if selected_id:
-        patient = df[df["Patient ID"] == selected_id].iloc[0]
-
-        # ---- Chuẩn bị đầu vào cho mô hình lâm sàng ----
-        if isinstance(clinical_metadata, dict) and "features" in clinical_metadata:
-            feature_cols = clinical_metadata["features"]
+        st.info("Please upload a breast ultrasound image to analyze.")
+        
+# Tab 2: Clinical data input for survival prediction
+with tab2:
+    st.header("Clinical Survival Prediction")
+    st.write("Enter the patient's clinical information below. Upon submission, the model will predict the patient's 5-year survival outcome (Living or Deceased).")
+    # Create a form for input fields
+    with st.form("clinical_form"):
+        # Numeric features
+        age = st.number_input("Age at Diagnosis", min_value=0.0, max_value=120.0, value=50.0)
+        tumor_size = st.number_input("Tumor Size (mm)", min_value=0.0, max_value=200.0, value=20.0)
+        lymph_pos = st.number_input("Lymph nodes examined positive", min_value=0, max_value=50, value=0, step=1)
+        mutation_count = st.number_input("Mutation Count", min_value=0, max_value=10000, value=0, step=1)
+        npi = st.number_input("Nottingham Prognostic Index", min_value=0.0, max_value=10.0, value=4.0, format="%.2f")
+        os_months = st.number_input("Overall Survival (Months)", min_value=0.0, max_value=300.0, value=60.0, format="%.2f")
+        
+        # Categorical features (with baseline category as first option by default)
+        surgery_type = st.selectbox("Type of Breast Surgery", ["Breast Conserving", "Mastectomy"], index=0)
+        hist_grade = st.selectbox("Neoplasm Histologic Grade", [1, 2, 3], index=0)
+        tumor_stage = st.selectbox("Tumor Stage", [1, 2, 3, 4], index=0)
+        sex = st.selectbox("Sex", ["Female", "Male"], index=0)
+        cellularity = st.selectbox("Cellularity", ["High", "Low", "Moderate"], index=0)
+        chemo = st.selectbox("Chemotherapy", ["No", "Yes"], index=0)
+        hormone = st.selectbox("Hormone Therapy", ["No", "Yes"], index=0)
+        radio = st.selectbox("Radio Therapy", ["No", "Yes"], index=0)
+        er_status = st.selectbox("ER Status", ["Negative", "Positive"], index=0)
+        pr_status = st.selectbox("PR Status", ["Negative", "Positive"], index=0)
+        her2_status = st.selectbox("HER2 Status", ["Negative", "Positive"], index=0)
+        gene_subtype = st.selectbox("3-Gene classifier subtype", 
+                                    ["ER+/HER2+", "ER+/HER2- High Prolif", "ER+/HER2- Low Prolif", "ER-/HER2+", "ER-/HER2-"], index=0)
+        pam50_subtype = st.selectbox("Pam50 + Claudin-low subtype", 
+                                     ["Basal-like", "Claudin-low", "HER2-enriched", "Luminal A", "Luminal B", "Normal-like"], index=0)
+        relapse_status = st.selectbox("Relapse Free Status", ["Not Recurred", "Recurred"], index=0)
+        
+        submit_btn = st.form_submit_button("Predict Survival")
+    
+    if submit_btn:
+        # When the user submits the form, construct the feature vector
+        # Initialize a dataframe with one row, all features set to 0
+        X_input = pd.DataFrame(data=[np.zeros(len(feature_names))], columns=feature_names)
+        
+        # Set numeric features
+        X_input.at[0, "Age at Diagnosis"] = age
+        X_input.at[0, "Tumor Size"] = tumor_size
+        X_input.at[0, "Lymph nodes examined positive"] = lymph_pos
+        X_input.at[0, "Mutation Count"] = mutation_count
+        X_input.at[0, "Nottingham prognostic index"] = npi
+        X_input.at[0, "Overall Survival (Months)"] = os_months
+        
+        # Helper function to set dummy column for a categorical value (if not baseline)
+        def set_dummy(col_name, value):
+            dummy_col = f"{col_name}_{value}"
+            # If the value is numeric (e.g., 2.0), ensure format matches the column name
+            if isinstance(value, (int, float)):
+                # For numeric categories, match the exact format in feature_names (e.g., "2.0")
+                # (If value has no decimal and baseline was float, add .0)
+                if f"{col_name}_{value}" not in feature_names and f"{col_name}_{value}.0" in feature_names:
+                    dummy_col = f"{col_name}_{value}.0"
+                else:
+                    dummy_col = f"{col_name}_{value}"
+            # Set dummy column to 1 if it exists (means the selected category is not the baseline)
+            if dummy_col in feature_names:
+                X_input.at[0, dummy_col] = 1
+        
+        # Set categorical features (only the dummy corresponding to the chosen category)
+        set_dummy("Type of Breast Surgery", surgery_type)
+        set_dummy("Neoplasm Histologic Grade", hist_grade)
+        set_dummy("Tumor Stage", tumor_stage)
+        set_dummy("Sex", sex)
+        set_dummy("Cellularity", cellularity)
+        set_dummy("Chemotherapy", chemo)
+        set_dummy("Hormone Therapy", hormone)
+        set_dummy("Radio Therapy", radio)
+        set_dummy("ER Status", er_status)
+        set_dummy("PR Status", pr_status)
+        set_dummy("HER2 Status", her2_status)
+        set_dummy("3-Gene classifier subtype", gene_subtype)
+        set_dummy("Pam50 + Claudin-low subtype", pam50_subtype)
+        set_dummy("Relapse Free Status", relapse_status)
+        
+        # Make prediction using the gradient boosting model
+        y_pred = gb_model.predict(X_input)[0]              # predicted class (0 or 1)
+        y_proba = gb_model.predict_proba(X_input)[0, 1]    # probability of class 1 ("Deceased")
+        outcome_label = inv_label_map.get(y_pred, "Unknown")
+        
+        # Display the prediction result
+        if outcome_label == "Deceased":
+            st.error(f"**Predicted Outcome:** {outcome_label} (high risk).")
         else:
-            cols = [c for c in df.columns if c not in [
-                "Patient ID", "Overall Survival (Months)",
-                "Overall Survival Status", "Relapse Free Status (Months)",
-                "Relapse Free Status", "Patient's Vital Status"
-            ]]
-            feature_cols = cols
-
-        X_input = patient[feature_cols].copy()
-
-        if isinstance(clinical_metadata, dict):
-            # encoders
-            if "encoders" in clinical_metadata:
-                for col, encoder in clinical_metadata["encoders"].items():
-                    if col not in X_input.index:
-                        continue
-                    try:
-                        X_input[col] = encoder.transform([X_input[col]])[0]
-                    except Exception:
-                        if isinstance(encoder, dict):
-                            X_input[col] = encoder.get(X_input[col], X_input[col])
-
-            # scaler
-            if "scaler" in clinical_metadata:
-                X_df = pd.DataFrame([X_input.values], columns=feature_cols)
-                X_scaled = clinical_metadata["scaler"].transform(X_df)
-            else:
-                X_scaled = np.array([X_input.values])
-        else:
-            X_scaled = np.array([X_input.values])
-
-        # ---- Dự đoán với mô hình lâm sàng ----
-        y_pred = clinical_model.predict(X_scaled)
-        pred_label = None
-        pred_prob = None
-
-        if hasattr(clinical_model, "predict_proba"):
-            try:
-                prob = clinical_model.predict_proba(X_scaled)
-                pred_prob = float(np.max(prob))
-            except Exception:
-                pred_prob = None
-
-        if isinstance(clinical_metadata, dict) and "target_encoder" in clinical_metadata:
-            try:
-                pred_label = clinical_metadata["target_encoder"].inverse_transform(y_pred)[0]
-            except Exception:
-                pred_label = str(y_pred[0])
-        elif isinstance(clinical_metadata, dict) and "target_map" in clinical_metadata:
-            inv_map = {v: k for k, v in clinical_metadata["target_map"].items()}
-            pred_label = inv_map.get(int(y_pred[0]), str(y_pred[0]))
-        else:
-            pred_label = "Living" if int(y_pred[0]) == 0 else "Died of Disease"
-
-        actual_label = patient["Patient's Vital Status"]
-
-        st.subheader("Kết quả dự đoán cho bệnh nhân " + selected_id)
-        result_text = f"**Dự đoán của mô hình:** {pred_label}"
-        if pred_prob is not None:
-            result_text += f" (xác suất {pred_prob*100:.1f}%)"
-        st.write(result_text)
-        st.write(f"**Tình trạng thực tế:** {actual_label}")
+            st.success(f"**Predicted Outcome:** {outcome_label} (likely survivor).")
+        st.write(f"**Probability of death:** {y_proba*100:.1f}%")
+        st.caption("(*Note:* The model prediction is based on the provided data and assumes a 5-year follow-up period.)")
