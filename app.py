@@ -16,6 +16,8 @@ from PIL import Image
 from io import BytesIO
 from tensorflow.keras.preprocessing.image import img_to_array
 from tensorflow.keras.applications.efficientnet import preprocess_input
+import sklearn, joblib, numpy as np
+st.sidebar.caption(f"sklearn={sklearn.__version__} | joblib={joblib.__version__} | numpy={np.__version__}")
 
 # ==============================
 # ⚙️ Cấu hình mô hình ẢNH
