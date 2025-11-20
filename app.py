@@ -1,81 +1,36 @@
 import os
 import io
 import platform
+import pickle
 
+import streamlit as st
+import altair as alt
 import gdown
 import numpy as np
 import pandas as pd
 import cv2
 import joblib
-import streamlit as st
-import altair as alt
 
 import tensorflow as tf
 import keras
 from keras.models import load_model
 import sklearn
-import pickle
-from keras.saving import register_keras_serializable
-
-# ---- CBAM Lambda helpers: ĐĂNG KÝ cho Keras 3 ----
-@register_keras_serializable(package="cbam", name="spatial_mean")
-def spatial_mean(x):
-    # (B, H, W, C) -> (B, H, W, 1)
-    return tf.reduce_mean(x, axis=-1, keepdims=True)
-
-@register_keras_serializable(package="cbam", name="spatial_max")
-def spatial_max(x):
-    # (B, H, W, C) -> (B, H, W, 1)
-    return tf.reduce_max(x, axis=-1, keepdims=True)
-
-@register_keras_serializable(package="cbam", name="spatial_output_shape")
-def spatial_output_shape(input_shape):
-    """
-    Một số Lambda trong file .keras của bạn đã lưu output_shape dưới dạng hàm.
-    Keras 3 sẽ gọi lại hàm này khi deserialize.
-    """
-    try:
-        shape = tf.TensorShape(input_shape).as_list()
-    except Exception:
-        shape = list(input_shape) if isinstance(input_shape, (list, tuple)) else input_shape
-    if isinstance(shape, (list, tuple)):
-        # Nếu input 4D: (B, H, W, C) -> (B, H, W, 1)
-        if len(shape) == 4:
-            return (shape[0], shape[1], shape[2], 1)
-        # Nếu input 3D: (H, W, C) -> (H, W, 1)
-        if len(shape) == 3:
-            return (shape[0], shape[1], 1)
-    return shape  # fallback
-
-CUSTOM_OBJECTS = {
-    "spatial_mean": spatial_mean,
-    "spatial_max": spatial_max,
-    "spatial_output_shape": spatial_output_shape,
-}
 
 # ==============================
-# 0) Patch lỗi NumPy BitGenerator khi load .pkl
+# Patch NumPy BitGenerator khi load .pkl (PCG64, v.v.)
 # ==============================
 def _patch_numpy_bitgenerator():
     try:
         from numpy.random import _pickle as _np_pickle
         _orig = _np_pickle.__bit_generator_ctor
-
         def _patched(bit_generator):
             if isinstance(bit_generator, str):
-                # đổi sang tên BitGenerator chuẩn trong NumPy mới
-                if bit_generator.endswith(".PCG64"):
-                    bit_generator = "PCG64"
-                elif bit_generator.endswith(".PCG64DXSM"):
-                    bit_generator = "PCG64DXSM"
-                elif bit_generator.endswith(".MT19937"):
-                    bit_generator = "MT19937"
-                elif bit_generator.endswith(".Philox"):
-                    bit_generator = "Philox"
-                elif bit_generator.endswith(".SFC64"):
-                    bit_generator = "SFC64"
+                if bit_generator.endswith(".PCG64"): bit_generator = "PCG64"
+                elif bit_generator.endswith(".PCG64DXSM"): bit_generator = "PCG64DXSM"
+                elif bit_generator.endswith(".MT19937"): bit_generator = "MT19937"
+                elif bit_generator.endswith(".Philox"): bit_generator = "Philox"
+                elif bit_generator.endswith(".SFC64"): bit_generator = "SFC64"
             return _orig(bit_generator)
-
         _np_pickle.__bit_generator_ctor = _patched
     except Exception as e:
         print("Skip BitGenerator patch:", e)
@@ -83,11 +38,10 @@ def _patch_numpy_bitgenerator():
 _patch_numpy_bitgenerator()
 
 # ==============================
-# 1) CUSTOM OBJECTS cho Lambda/CBAM trong model .keras
+# CUSTOM OBJECTS cho các Lambda/CBAM dùng khi train
 # ==============================
 @keras.saving.register_keras_serializable(package="CBAM")
 def spatial_mean(x):
-    # channels_last => trục kênh là -1
     return tf.reduce_mean(x, axis=-1, keepdims=True)
 
 @keras.saving.register_keras_serializable(package="CBAM")
@@ -96,22 +50,44 @@ def spatial_max(x):
 
 @keras.saving.register_keras_serializable(package="CBAM")
 def cbam_mult(x):
-    # x: [feature, attention]
     return x[0] * x[1]
 
 @keras.saving.register_keras_serializable(package="CBAM")
 def cbam_mult2(x):
     return x[0] * x[1]
 
+# Hàm này xuất hiện trong config (.keras) của bạn như output_shape cho Lambda
+@keras.saving.register_keras_serializable(package="CBAM")
+def spatial_output_shape(input_shape):
+    def _as_list(s):
+        try:
+            if isinstance(s, tf.TensorShape):
+                return s.as_list()
+        except Exception:
+            pass
+        return list(s) if isinstance(s, (tuple, list)) else s
+    s = input_shape
+    if isinstance(s, (list, tuple)) and len(s) > 0 and isinstance(s[0], (list, tuple, tf.TensorShape)):
+        s = _as_list(s[0])
+    else:
+        s = _as_list(s)
+    if isinstance(s, (list, tuple)):
+        if len(s) == 4:  # (B,H,W,C)
+            return (s[0], s[1], s[2], 1)
+        if len(s) == 3:  # (H,W,C)
+            return (s[0], s[1], 1)
+    return s
+
 CUSTOM_OBJECTS = {
     "spatial_mean": spatial_mean,
     "spatial_max": spatial_max,
     "cbam_mult": cbam_mult,
     "cbam_mult2": cbam_mult2,
+    "spatial_output_shape": spatial_output_shape,
 }
 
 # ==============================
-# 2) Tải model từ Google Drive (1 lần)
+# Tải model từ Google Drive (1 lần)
 # ==============================
 MODEL_DIR = "models"
 os.makedirs(MODEL_DIR, exist_ok=True)
@@ -127,46 +103,43 @@ with st.spinner("Đang kiểm tra & tải mô hình (lần đầu có thể hơi
     for fname, fid in drive_files.items():
         dst = os.path.join(MODEL_DIR, fname)
         if not os.path.exists(dst):
-            url = f"https://drive.google.com/uc?id={fid}"
-            gdown.download(url, dst, quiet=False)
+            gdown.download(f"https://drive.google.com/uc?id={fid}", dst, quiet=False)
 
 # ==============================
-# 3) Load models (cache)
+# Load models (cache)
 # ==============================
 def _joblib_load_robust(path: str):
     try:
         return joblib.load(path)
     except Exception as e:
-        # fallback đổi tên module numpy cũ -> mới nếu cần
+        # Remap các tên lớp generator cũ -> mới nếu file .pkl được tạo với NumPy cũ
         if "BitGenerator" in str(e) or "_pcg64" in str(e):
-            try:
-                with open(path, "rb") as f:
-                    data = f.read()
-                bio = io.BytesIO(data)
-
-                class _RenameUnpickler(pickle.Unpickler):
-                    def find_class(self, module, name):
-                        if module == "numpy.random._pcg64" and name == "PCG64":
-                            module = "numpy.random._bit_generator"
-                        if module == "numpy.random.bit_generator" and name == "BitGenerator":
-                            module = "numpy.random._bit_generator"
-                        return super().find_class(module, name)
-                return _RenameUnpickler(bio).load()
-            except Exception as e2:
-                raise e2
+            with open(path, "rb") as f:
+                data = f.read()
+            bio = io.BytesIO(data)
+            class _RenameUnpickler(pickle.Unpickler):
+                def find_class(self, module, name):
+                    if module == "numpy.random._pcg64" and name == "PCG64":
+                        module = "numpy.random._bit_generator"
+                    if module == "numpy.random.bit_generator" and name == "BitGenerator":
+                        module = "numpy.random._bit_generator"
+                    return super().find_class(module, name)
+            return _RenameUnpickler(bio).load()
         raise
 
 @st.cache_resource
 def load_models():
+    # Quan trọng: safe_mode=False để cho phép Lambda có function tùy biến
     seg_model = load_model(
         os.path.join(MODEL_DIR, "best_model_cbam_attention_unet_fixed.keras"),
         compile=False,
         custom_objects=CUSTOM_OBJECTS,
-        safe_mode=False,  # <-- rất quan trọng để cho phép hàm tùy biến
+        safe_mode=False,
     )
     class_model = load_model(
         os.path.join(MODEL_DIR, "Classifier_model_2.h5"),
-        compile=False
+        compile=False,
+        safe_mode=False,
     )
     gb_model = _joblib_load_robust(os.path.join(MODEL_DIR, "clinical_epic_gb_model.pkl"))
     gb_meta  = _joblib_load_robust(os.path.join(MODEL_DIR, "clinical_epic_gb_metadata.pkl"))
@@ -175,13 +148,12 @@ def load_models():
 seg_model, class_model, gb_model, gb_meta = load_models()
 
 # ==============================
-# 4) Utils xử lý ảnh/overlay
+# Utils xử lý ảnh/overlay
 # ==============================
 def get_input_hwc(model):
-    shape = model.input_shape
-    if isinstance(shape, list):
-        shape = shape[0]
-    _, H, W, C = shape
+    shp = model.input_shape
+    if isinstance(shp, list): shp = shp[0]
+    _, H, W, C = shp
     H = 256 if H is None else int(H)
     W = 256 if W is None else int(W)
     C = 3   if C is None else int(C)
@@ -198,13 +170,11 @@ def prep_for_model(gray_uint8, target_hwc):
         x = np.expand_dims(x, axis=0)
     return x, resized
 
-# màu overlay: 1= xanh (lành), 2= đỏ (ác), 3= vàng (general)
-SEG_COLORS = {
+SEG_COLORS = {  # 1=benign (green), 2=malignant (red), 3=general (yellow)
     1: np.array([0, 255, 0], dtype=np.float32),
     2: np.array([255, 0, 0], dtype=np.float32),
     3: np.array([255, 255, 0], dtype=np.float32),
 }
-
 def overlay_multiclass(base_gray_uint8, mask_uint8, alpha=0.6):
     base = np.stack([base_gray_uint8]*3, axis=-1).astype(np.float32)
     over = base.copy()
@@ -215,12 +185,11 @@ def overlay_multiclass(base_gray_uint8, mask_uint8, alpha=0.6):
     return np.clip(over, 0, 255).astype(np.uint8)
 
 # ==============================
-# 5) UI
+# UI
 # ==============================
 st.set_page_config(page_title="Breast Cancer Prediction App", layout="wide")
 st.title("Breast Cancer Prediction App")
 
-# Hiển thị version để debug môi trường khi cần
 st.sidebar.markdown(
     f"""
 **Versions**
@@ -234,7 +203,7 @@ st.sidebar.markdown(
 
 tab1, tab2 = st.tabs(["🔎 Ultrasound Image Analysis", "📊 Clinical Survival Prediction"])
 
-# ---- Tab 1: Ảnh ----
+# ---- Tab 1
 with tab1:
     st.header("Ultrasound Image Analysis")
     uploaded = st.file_uploader("Choose an ultrasound image (PNG/JPG)", type=["png", "jpg", "jpeg"])
@@ -247,27 +216,24 @@ with tab1:
         else:
             gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-            # Chuẩn bị input đúng kích thước/kênh của mỗi model
             seg_hwc = get_input_hwc(seg_model)
             clf_hwc = get_input_hwc(class_model)
             x_seg, gray_seg = prep_for_model(gray, seg_hwc)
             x_clf, gray_clf = prep_for_model(gray, clf_hwc)
 
-            # ---- Segmentation (đa lớp) ----
             with st.spinner("Running segmentation..."):
-                seg_pred = seg_model.predict(x_seg, verbose=0)[0]  # (H,W,K) hoặc (H,W,1)
+                seg_pred = seg_model.predict(x_seg, verbose=0)[0]
 
             if seg_pred.ndim == 3 and seg_pred.shape[-1] >= 3:
                 seg_mask = np.argmax(seg_pred, axis=-1).astype(np.uint8)  # 0..K-1
             else:
-                seg_mask = (seg_pred[..., 0] >= 0.5).astype(np.uint8)     # fallback nhị phân
-                seg_mask[seg_mask == 1] = 3  # hiển thị màu vàng nếu chỉ có 1 lớp
+                seg_mask = (seg_pred[..., 0] >= 0.5).astype(np.uint8)
+                seg_mask[seg_mask == 1] = 3  # nếu chỉ nhị phân: dùng lớp 'general' (vàng)
 
             overlay_img = overlay_multiclass(gray_seg, seg_mask, alpha=0.6)
 
-            # ---- Classification ----
             with st.spinner("Running classification..."):
-                class_probs = class_model.predict(x_clf, verbose=0)[0]  # (3,)
+                class_probs = class_model.predict(x_clf, verbose=0)[0]
             class_names = ["benign", "malignant", "normal"]
             pred_idx = int(np.argmax(class_probs))
             pred_label = class_names[pred_idx]
@@ -295,7 +261,7 @@ with tab1:
     else:
         st.info("Please upload a breast ultrasound image to analyze.")
 
-# ---- Tab 2: Lâm sàng ----
+# ---- Tab 2
 with tab2:
     st.header("Clinical Survival Prediction")
     try:
@@ -352,7 +318,7 @@ with tab2:
                 if col in X.columns:
                     X.at[0, col] = val
 
-            # Helper cho one-hot theo đúng tên cột
+            # One-hot theo đúng tên cột
             def set_dummy(col, val):
                 dummy = f"{col}_{val}"
                 if isinstance(val, (int, float)) and dummy not in X.columns and f"{col}_{val}.0" in X.columns:
@@ -360,7 +326,6 @@ with tab2:
                 if dummy in X.columns:
                     X.at[0, dummy] = 1
 
-            # Categorical one-hot
             set_dummy("Type of Breast Surgery", surgery_type)
             set_dummy("Neoplasm Histologic Grade", hist_grade)
             set_dummy("Tumor Stage", tumor_stage)
@@ -376,9 +341,7 @@ with tab2:
             set_dummy("Pam50 + Claudin-low subtype", pam50_subtype)
             set_dummy("Relapse Free Status", relapse_status)
 
-            # Dự đoán
             y_pred = gb_model.predict(X)[0]
-            label_map = gb_meta.get("label_map", {"Living": 0, "Deceased": 1})
             inv_label_map = {v: k for k, v in label_map.items()}
             outcome = inv_label_map.get(int(y_pred), str(y_pred))
             death_prob = None
