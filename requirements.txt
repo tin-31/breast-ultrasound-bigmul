@@ -1,7 +1,6 @@
 numpy==1.26.4
-scikit-learn==1.2.2
-skops==0.13.0
 pandas
+scikit-learn==1.2.2
 opencv-python-headless
 tensorflow==2.16.1
 keras==3.4.1
