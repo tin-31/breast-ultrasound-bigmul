@@ -220,26 +220,23 @@ with tab2:
     if clinical_model is None:
         st.error("❌ Clinical model not loaded.")
     else:
-        feature_names = clinical_meta["feature_names"]
-        num_cols = clinical_meta["num_cols"]
-        cat_cols = clinical_meta["cat_cols"]
+        # 👉 Lấy feature trực tiếp từ model RF
+        feature_names = clinical_model.feature_names_in_
         label_map = clinical_meta["label_map"]
-        inv_label = {v:k for k,v in label_map.items()}
+        inv_label = {v: k for k, v in label_map.items()}
 
-        # FORM
+        # FORM INPUT (đúng theo feature_names)
         with st.form("clinical"):
 
-            # Numeric
             age = st.number_input("Age at Diagnosis", 0,120,50)
             size = st.number_input("Tumor Size",0,200,20)
-            lymph = st.number_input("Lymph nodes +",0,50,0)
+            lymph = st.number_input("Lymph nodes examined positive",0,50,0)
             mut = st.number_input("Mutation Count",0,10000,0)
-            npi = st.number_input("Nottingham Prognostic Index",0.0,10.0,4.0)
+            npi = st.number_input("Nottingham prognostic index",0.0,10.0,4.0)
             os_m = st.number_input("Overall Survival (Months)",0.0,300.0,60.0)
 
-            # Categorical
             sx = st.selectbox("Type of Breast Surgery",["Breast Conserving","Mastectomy"])
-            grade = st.selectbox("Histologic Grade",[1,2,3])
+            grade = st.selectbox("Neoplasm Histologic Grade",[1,2,3])
             stage = st.selectbox("Tumor Stage",[1,2,3,4])
             sex = st.selectbox("Sex",["Female","Male"])
             cell = st.selectbox("Cellularity",["High","Low","Moderate"])
@@ -249,58 +246,43 @@ with tab2:
             er = st.selectbox("ER Status",["Negative","Positive"])
             pr = st.selectbox("PR Status",["Negative","Positive"])
             her2 = st.selectbox("HER2 Status",["Negative","Positive"])
-            gene = st.selectbox("3-Gene subtype",
+            gene = st.selectbox("3-Gene classifier subtype",
                 ["ER+/HER2+","ER+/HER2- High Prolif","ER+/HER2- Low Prolif",
                  "ER-/HER2+","ER-/HER2-"])
-            pam50 = st.selectbox("Pam50 subtype",
+            pam50 = st.selectbox("Pam50 + Claudin-low subtype",
                 ["Basal-like","Claudin-low","HER2-enriched","Luminal A","Luminal B","Normal-like"])
-            relapse = st.selectbox("Relapse Status",["Not Recurred","Recurred"])
+            relapse = st.selectbox("Relapse Free Status",["Not Recurred","Recurred"])
 
             submit = st.form_submit_button("Predict")
 
         if submit:
 
-            # Create empty row
-            X = pd.DataFrame([np.zeros(len(feature_names))], columns=feature_names)
-
-            # Numeric
-            values = {
+            # 👉 Tạo row theo đúng feature_names_in_
+            row = {
                 "Age at Diagnosis": age,
                 "Tumor Size": size,
                 "Lymph nodes examined positive": lymph,
                 "Mutation Count": mut,
                 "Nottingham prognostic index": npi,
-                "Overall Survival (Months)": os_m
+                "Overall Survival (Months)": os_m,
+                "Type of Breast Surgery": sx,
+                "Neoplasm Histologic Grade": grade,
+                "Tumor Stage": stage,
+                "Sex": sex,
+                "Cellularity": cell,
+                "Chemotherapy": chemo,
+                "Hormone Therapy": hormone,
+                "Radio Therapy": radio,
+                "ER Status": er,
+                "PR Status": pr,
+                "HER2 Status": her2,
+                "3-Gene classifier subtype": gene,
+                "Pam50 + Claudin-low subtype": pam50,
+                "Relapse Free Status": relapse
             }
-            for k,v in values.items():
-                if k in X.columns:
-                    X.at[0,k] = v
 
-            # One-hot helper
-            def set_dummy(col,val):
-                key = f"{col}_{val}"
-                if key in X.columns:
-                    X.at[0,key] = 1
-                elif f"{key}.0" in X.columns:
-                    X.at[0,f"{key}.0"] = 1
+            X = pd.DataFrame([row], columns=feature_names)
 
-            # Categorical
-            set_dummy("Type of Breast Surgery", sx)
-            set_dummy("Neoplasm Histologic Grade", grade)
-            set_dummy("Tumor Stage", stage)
-            set_dummy("Sex", sex)
-            set_dummy("Cellularity", cell)
-            set_dummy("Chemotherapy", chemo)
-            set_dummy("Hormone Therapy", hormone)
-            set_dummy("Radio Therapy", radio)
-            set_dummy("ER Status", er)
-            set_dummy("PR Status", pr)
-            set_dummy("HER2 Status", her2)
-            set_dummy("3-Gene classifier subtype", gene)
-            set_dummy("Pam50 + Claudin-low subtype", pam50)
-            set_dummy("Relapse Free Status", relapse)
-
-            # Predict
             y = int(clinical_model.predict(X)[0])
             pred_label = inv_label[y]
 
