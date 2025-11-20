@@ -1,11 +1,10 @@
 numpy==1.26.4
 scikit-learn==1.2.2
 skops==0.13.0
-pickle-mixin
-gdown
+pandas
 opencv-python-headless
 tensorflow==2.16.1
 keras==3.4.1
-pandas
-altair
+gdown
+altair==4.2.2
 streamlit
