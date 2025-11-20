@@ -199,81 +199,103 @@ with tab1:
 
 
 # ============================
-# TAB 2 — CLINICAL PREDICTION
-# ============================
+# ======================================================
+# TAB 2 — CLINICAL (FIXED 100%)
+# ======================================================
 with tab2:
     st.header("Clinical Survival Prediction")
 
     if clinical_model is None:
         st.error("❌ Clinical model unavailable.")
+        st.stop()
+
+    # Load metadata
+    num_cols = clinical_meta["num_cols"]
+    cat_cols = clinical_meta["cat_cols"]
+    label_map = clinical_meta["label_map"]
+    all_features = clinical_meta["feature_names"]
+    inv_label = {v: k for k, v in label_map.items()}
+
+    # Build input form
+    with st.form("clinical_form"):
+        # Numeric
+        age = st.number_input("Age", 0, 120, 50)
+        size = st.number_input("Tumor Size (mm)", 0, 200, 20)
+        lymph = st.number_input("Lymph nodes examined positive", 0, 50, 0)
+        mut = st.number_input("Mutation Count", 0, 20000, 0)
+        npi = st.number_input("Nottingham prognostic index", 0.0, 10.0, 4.0)
+        os_m = st.number_input("Overall Survival (Months)", 0.0, 300.0, 60.0)
+
+        # Categorical choices – EXACT names from metadata
+        sx = st.selectbox("Type of Breast Surgery", ["Breast Conserving", "Mastectomy"])
+        grade = st.selectbox("Neoplasm Histologic Grade", [1,2,3])
+        stage = st.selectbox("Tumor Stage", [1,2,3,4])
+        sex = st.selectbox("Sex", ["Female","Male"])
+        cell = st.selectbox("Cellularity", ["High","Low","Moderate"])
+        chemo = st.selectbox("Chemotherapy", ["No","Yes"])
+        hormone = st.selectbox("Hormone Therapy", ["No","Yes"])
+        radio = st.selectbox("Radio Therapy", ["No","Yes"])
+        er = st.selectbox("ER Status", ["Negative","Positive"])
+        pr = st.selectbox("PR Status", ["Negative","Positive"])
+        her2 = st.selectbox("HER2 Status", ["Negative","Positive"])
+        gene = st.selectbox(
+            "3-Gene classifier subtype",
+            ["ER+/HER2+", "ER+/HER2- High Prolif", "ER+/HER2- Low Prolif", 
+             "ER-/HER2+", "ER-/HER2-"]
+        )
+        pam50 = st.selectbox(
+            "Pam50 + Claudin-low subtype",
+            ["Basal-like","Claudin-low","HER2-enriched","Luminal A","Luminal B","Normal-like"]
+        )
+        relapse = st.selectbox("Relapse Free Status", ["Not Recurred","Recurred"])
+
+        submit = st.form_submit_button("Predict Survival")
+
+    if not submit:
+        st.stop()
+
+    # Build input row EXACT like training
+    row = {
+        "Age at Diagnosis": age,
+        "Tumor Size": size,
+        "Lymph nodes examined positive": lymph,
+        "Mutation Count": mut,
+        "Nottingham prognostic index": npi,
+        "Overall Survival (Months)": os_m,
+        "Type of Breast Surgery": sx,
+        "Neoplasm Histologic Grade": grade,
+        "Tumor Stage": stage,
+        "Sex": sex,
+        "Cellularity": cell,
+        "Chemotherapy": chemo,
+        "Hormone Therapy": hormone,
+        "Radio Therapy": radio,
+        "ER Status": er,
+        "PR Status": pr,
+        "HER2 Status": her2,
+        "3-Gene classifier subtype": gene,
+        "Pam50 + Claudin-low subtype": pam50,
+        "Relapse Free Status": relapse,
+    }
+
+    X = pd.DataFrame([row])
+
+    # One-hot EXACT columns
+    X_enc = pd.get_dummies(X)
+
+    # Align with model
+    X_enc = X_enc.reindex(columns=all_features, fill_value=0)
+
+    # Predict
+    pred = int(clinical_model.predict(X_enc)[0])
+    outcome = inv_label[pred]
+
+    prob = clinical_model.predict_proba(X_enc)[0][ label_map["Deceased"] ]
+
+    # Display result
+    if outcome == "Deceased":
+        st.error(f"Predicted: **{outcome}**")
     else:
-        feats = clinical_meta["num_cols"] + clinical_meta["cat_cols"]
-        labels_map = clinical_meta["label_map"]
-        inv = {v:k for k,v in labels_map.items()}
+        st.success(f"Predicted: **{outcome}**")
 
-        with st.form("clinical"):
-
-            age = st.number_input("Age",0,120,50)
-            size = st.number_input("Tumor Size",0,200,20)
-            lymph = st.number_input("Lymph nodes +",0,50,0)
-            mut = st.number_input("Mutation Count",0,10000,0)
-            npi = st.number_input("NPI",0.0,10.0,4.0)
-            os_m = st.number_input("Overall Survival (Months)",0.0,300.0,60.0)
-
-            sx = st.selectbox("Surgery",["Breast Conserving","Mastectomy"])
-            grade = st.selectbox("Histologic Grade",[1,2,3])
-            stage = st.selectbox("Tumor Stage",[1,2,3,4])
-            sex = st.selectbox("Sex",["Female","Male"])
-            cell = st.selectbox("Cellularity",["High","Low","Moderate"])
-            chemo = st.selectbox("Chemotherapy",["No","Yes"])
-            hormone = st.selectbox("Hormone Therapy",["No","Yes"])
-            radio = st.selectbox("Radio Therapy",["No","Yes"])
-            er = st.selectbox("ER Status",["Negative","Positive"])
-            pr = st.selectbox("PR Status",["Negative","Positive"])
-            her2 = st.selectbox("HER2 Status",["Negative","Positive"])
-            gene = st.selectbox("3-Gene subtype",
-                ["ER+/HER2+","ER+/HER2- High Prolif","ER+/HER2- Low Prolif","ER-/HER2+","ER-/HER2-"])
-            pam50 = st.selectbox("Pam50 subtype",
-                ["Basal-like","Claudin-low","HER2-enriched","Luminal A","Luminal B","Normal-like"])
-            relapse = st.selectbox("Relapse Status",["Not Recurred","Recurred"])
-
-            submit = st.form_submit_button("Predict")
-
-        if submit:
-            df = pd.DataFrame([{
-                "Age at Diagnosis": age,
-                "Tumor Size": size,
-                "Lymph nodes examined positive": lymph,
-                "Mutation Count": mut,
-                "Nottingham prognostic index": npi,
-                "Overall Survival (Months)": os_m,
-                "Type of Breast Surgery": sx,
-                "Neoplasm Histologic Grade": grade,
-                "Tumor Stage": stage,
-                "Sex": sex,
-                "Cellularity": cell,
-                "Chemotherapy": chemo,
-                "Hormone Therapy": hormone,
-                "Radio Therapy": radio,
-                "ER Status": er,
-                "PR Status": pr,
-                "HER2 Status": her2,
-                "3-Gene classifier subtype": gene,
-                "Pam50 + Claudin-low subtype": pam50,
-                "Relapse Free Status": relapse,
-            }])
-
-            df = pd.get_dummies(df)
-            df = df.reindex(columns=clinical_model.feature_names_in_, fill_value=0)
-
-            y = int(clinical_model.predict(df)[0])
-            label = inv[y]
-
-            prob = clinical_model.predict_proba(df)[0][ labels_map["Deceased"] ]
-
-            if label=="Deceased":
-                st.error(f"Kết quả: **{label}**")
-            else:
-                st.success(f"Kết quả: **{label}**")
-
-            st.write(f"Xác suất tử vong: **{prob*100:.1f}%**")
+    st.write(f"Probability of death: **{prob*100:.1f}%**")
