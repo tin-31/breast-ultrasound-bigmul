@@ -1,4 +1,5 @@
 import os
+import json
 import platform
 
 import gdown
@@ -13,6 +14,10 @@ import keras
 from keras.models import load_model
 from keras.saving import register_keras_serializable
 import sklearn
+
+# 👇 thêm skops để load model lâm sàng
+from skops.io import load as skops_load
+
 
 # ============ 0) Keras custom objects cho CBAM/Lambda ============
 @register_keras_serializable(package="cbam", name="spatial_mean")
@@ -54,10 +59,18 @@ CUSTOM_OBJECTS = {
 MODEL_DIR = "models"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
-# ❗ Chỉ giữ lại 2 file Keras, bỏ hẳn các file .pkl
+# 👉 Thêm 2 file mới .skops + .json
 drive_files = {
+    # Keras models
     "Classifier_model_2.h5": "1fXPICuTkETep2oPiA56l0uMai2GusEJH",
     "best_model_cbam_attention_unet_fixed.keras": "1axOg7N5ssJrMec97eV-JMPzID26ynzN1",
+
+    # Clinical model (phiên bản mới)
+    # link bạn gửi:
+    # https://drive.google.com/file/d/1j-6DIy4UQ6R-7TwEVlOLg0FldfAkzGnO/view?usp=sharing
+    # https://drive.google.com/file/d/1i8er4zmW46bzY0wx4NzRq__06RWAuqvz/view?usp=sharing
+    "clinical_epic_gb_model.skops": "1j-6DIy4UQ6R-7TwEVlOLg0FldfAkzGnO",
+    "clinical_epic_gb_metadata.json": "1i8er4zmW46bzY0wx4NzRq__06RWAuqvz",
 }
 
 with st.spinner("Đang kiểm tra & tải mô hình (chỉ lần đầu)…"):
@@ -70,25 +83,42 @@ with st.spinner("Đang kiểm tra & tải mô hình (chỉ lần đầu)…"):
 # ============ 2) Load models với cache ============
 @st.cache_resource
 def load_models():
-    # Segmentation (Keras 3)
+    # ----- Segmentation (Keras 3) -----
     seg_model = load_model(
         os.path.join(MODEL_DIR, "best_model_cbam_attention_unet_fixed.keras"),
         compile=False,
         custom_objects=CUSTOM_OBJECTS,
         safe_mode=False,   # cần False để nhận Lambda custom
     )
-    # Classifier (h5)
+
+    # ----- Classifier (h5) -----
     class_model = load_model(
         os.path.join(MODEL_DIR, "Classifier_model_2.h5"),
         compile=False
     )
-    return seg_model, class_model
 
-seg_model, class_model = load_models()
+    # ----- Clinical model (skops + json) -----
+    gb_model = None
+    gb_meta = None
+    skops_path = os.path.join(MODEL_DIR, "clinical_epic_gb_model.skops")
+    meta_path  = os.path.join(MODEL_DIR, "clinical_epic_gb_metadata.json")
 
-# Các model lâm sàng: KHÔNG dùng được trong môi trường mới → đặt None
-gb_model = None
-gb_meta  = None
+    if os.path.exists(skops_path) and os.path.exists(meta_path):
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                gb_meta = json.load(f)
+
+            # trusted=True vì đây là file do chính bạn train & upload
+            gb_model = skops_load(skops_path, trusted=True)
+        except Exception as e:
+            st.warning(f"Không load được clinical model (.skops): {e}")
+            gb_model = None
+            gb_meta = None
+
+    return seg_model, class_model, gb_model, gb_meta
+
+
+seg_model, class_model, gb_model, gb_meta = load_models()
 
 # ============ 3) Utils xử lý ảnh/overlay ============
 def get_input_hwc(model):
@@ -101,6 +131,7 @@ def get_input_hwc(model):
     C = 3   if C is None else int(C)
     return H, W, C
 
+
 def prep_for_model(gray_uint8, target_hwc):
     H, W, C = target_hwc
     resized = cv2.resize(gray_uint8, (W, H), interpolation=cv2.INTER_LINEAR)
@@ -112,10 +143,12 @@ def prep_for_model(gray_uint8, target_hwc):
         x = np.expand_dims(x, axis=0)
     return x, resized
 
+
 # màu tô: 1= xanh (lành), 2= đỏ (ác)
 COLOR_BENIGN     = np.array([0, 255, 0], dtype=np.float32)
 COLOR_MALIGNANT  = np.array([255, 0, 0], dtype=np.float32)
 COLOR_GENERAL    = (0, 255, 255)  # BGR của vàng khi vẽ contour bằng OpenCV
+
 
 def overlay_multiclass_with_general(base_gray_uint8, mask_uint8, alpha=0.6):
     """
@@ -143,12 +176,13 @@ def overlay_multiclass_with_general(base_gray_uint8, mask_uint8, alpha=0.6):
         return over_uint8
     return np.clip(over, 0, 255).astype(np.uint8)
 
+
 # ============ 4) UI ============
 st.set_page_config(page_title="Breast Cancer Prediction App", layout="wide")
 st.title("Breast Cancer Prediction App")
 st.caption(
-    "Web cho phép tải ảnh siêu âm vú để **phân loại & phân đoạn đa lớp**. "
-    "Phần mô hình lâm sàng (survival) tạm thời không khả dụng do file `.pkl` quá cũ."
+    "Web cho phép tải ảnh siêu âm vú để **phân loại & phân đoạn đa lớp**, "
+    "và nhập **thông tin lâm sàng** để tiên lượng sống còn."
 )
 
 # Hiển thị version để debug nhanh
@@ -242,10 +276,112 @@ with tab2:
 
     if gb_model is None or gb_meta is None:
         st.warning(
-            "Clinical survival model hiện **không khả dụng** trong môi trường này "
-            "do file `.pkl` được train với NumPy rất cũ và không thể load an toàn. "
-            "Tab này tạm thời chỉ hiển thị thông báo (không có dự đoán)."
+            "Không load được clinical model (.skops). "
+            "Vui lòng kiểm tra lại file trên Google Drive hoặc thư viện `skops`."
         )
     else:
-        # Nếu sau này bạn có model mới (vd: .skops), có thể đặt code cũ vào đây
-        st.info("Clinical model is available. (Bạn có thể chèn lại code form + predict ở đây.)")
+        # Lấy metadata
+        try:
+            feature_names = gb_meta["feature_names"]
+            label_map     = gb_meta.get("label_map", {"Living": 0, "Deceased": 1})
+        except Exception as e:
+            st.error(f"Lỗi đọc metadata clinical model: {e}")
+            feature_names = None
+
+        if feature_names is not None:
+            inv_label_map = {v: k for k, v in label_map.items()}
+
+            with st.form("clinical_form"):
+                # Numeric
+                age           = st.number_input("Age at Diagnosis", min_value=0.0, max_value=120.0, value=50.0)
+                tumor_size    = st.number_input("Tumor Size (mm)", min_value=0.0, max_value=200.0, value=20.0)
+                lymph_pos     = st.number_input("Lymph nodes examined positive", min_value=0, max_value=50, value=0, step=1)
+                mutation_cnt  = st.number_input("Mutation Count", min_value=0, max_value=10000, value=0, step=1)
+                npi           = st.number_input("Nottingham prognostic index", min_value=0.0, max_value=10.0, value=4.0, format="%.2f")
+                os_months     = st.number_input("Overall Survival (Months)", min_value=0.0, max_value=300.0, value=60.0, format="%.2f")
+
+                # Categorical
+                surgery_type  = st.selectbox("Type of Breast Surgery", ["Breast Conserving", "Mastectomy"], index=0)
+                hist_grade    = st.selectbox("Neoplasm Histologic Grade", [1, 2, 3], index=0)
+                tumor_stage   = st.selectbox("Tumor Stage", [1, 2, 3, 4], index=0)
+                sex           = st.selectbox("Sex", ["Female", "Male"], index=0)
+                cellularity   = st.selectbox("Cellularity", ["High", "Low", "Moderate"], index=0)
+                chemo         = st.selectbox("Chemotherapy", ["No", "Yes"], index=0)
+                hormone       = st.selectbox("Hormone Therapy", ["No", "Yes"], index=0)
+                radio         = st.selectbox("Radio Therapy", ["No", "Yes"], index=0)
+                er_status     = st.selectbox("ER Status", ["Negative", "Positive"], index=0)
+                pr_status     = st.selectbox("PR Status", ["Negative", "Positive"], index=0)
+                her2_status   = st.selectbox("HER2 Status", ["Negative", "Positive"], index=0)
+                gene_subtype  = st.selectbox(
+                    "3-Gene classifier subtype",
+                    ["ER+/HER2+", "ER+/HER2- High Prolif", "ER+/HER2- Low Prolif", "ER-/HER2+", "ER-/HER2-"],
+                    index=0
+                )
+                pam50_subtype = st.selectbox(
+                    "Pam50 + Claudin-low subtype",
+                    ["Basal-like", "Claudin-low", "HER2-enriched", "Luminal A", "Luminal B", "Normal-like"],
+                    index=0
+                )
+                relapse_status = st.selectbox("Relapse Free Status", ["Not Recurred", "Recurred"], index=0)
+
+                submit_btn = st.form_submit_button("Predict Survival")
+
+            if submit_btn:
+                # Tạo DataFrame 1 dòng, đúng thứ tự feature_names
+                X = pd.DataFrame([np.zeros(len(feature_names))], columns=feature_names)
+
+                # Numeric
+                numeric_vals = {
+                    "Age at Diagnosis": age,
+                    "Tumor Size": tumor_size,
+                    "Lymph nodes examined positive": lymph_pos,
+                    "Mutation Count": mutation_cnt,
+                    "Nottingham prognostic index": npi,
+                    "Overall Survival (Months)": os_months
+                }
+                for col, val in numeric_vals.items():
+                    if col in X.columns:
+                        X.at[0, col] = val
+
+                # One-hot helper
+                def set_dummy(col, val):
+                    dummy = f"{col}_{val}"
+                    # trường hợp cột là số (1, 2, 3) nhưng trong feature_names là "x.0"
+                    if isinstance(val, (int, float)) and dummy not in X.columns and f"{col}_{val}.0" in X.columns:
+                        dummy = f"{col}_{val}.0"
+                    if dummy in X.columns:
+                        X.at[0, dummy] = 1
+
+                # Categorical
+                set_dummy("Type of Breast Surgery", surgery_type)
+                set_dummy("Neoplasm Histologic Grade", hist_grade)
+                set_dummy("Tumor Stage", tumor_stage)
+                set_dummy("Sex", sex)
+                set_dummy("Cellularity", cellularity)
+                set_dummy("Chemotherapy", chemo)
+                set_dummy("Hormone Therapy", hormone)
+                set_dummy("Radio Therapy", radio)
+                set_dummy("ER Status", er_status)
+                set_dummy("PR Status", pr_status)
+                set_dummy("HER2 Status", her2_status)
+                set_dummy("3-Gene classifier subtype", gene_subtype)
+                set_dummy("Pam50 + Claudin-low subtype", pam50_subtype)
+                set_dummy("Relapse Free Status", relapse_status)
+
+                # Dự đoán
+                y_pred = int(gb_model.predict(X)[0])
+                inv_label_map = {v: k for k, v in label_map.items()}
+                outcome = inv_label_map.get(y_pred, str(y_pred))
+
+                death_prob = None
+                if hasattr(gb_model, "predict_proba"):
+                    # lấy prob của lớp "Deceased"
+                    death_idx = label_map.get("Deceased", 1)
+                    death_prob = float(gb_model.predict_proba(X)[0, death_idx])
+
+                if outcome == "Deceased":
+                    st.error(f"**Predicted Outcome:** {outcome}")
+                else:
+                    st.success(f"**Predicted Outcome:** {outcome}")
+                if death_prob is not None:
+                    st.write(f"**Probability of death:** {death_prob*100:.1f}%")
