@@ -15,6 +15,43 @@ import keras
 from keras.models import load_model
 import sklearn
 import pickle
+from keras.saving import register_keras_serializable
+
+# ---- CBAM Lambda helpers: ĐĂNG KÝ cho Keras 3 ----
+@register_keras_serializable(package="cbam", name="spatial_mean")
+def spatial_mean(x):
+    # (B, H, W, C) -> (B, H, W, 1)
+    return tf.reduce_mean(x, axis=-1, keepdims=True)
+
+@register_keras_serializable(package="cbam", name="spatial_max")
+def spatial_max(x):
+    # (B, H, W, C) -> (B, H, W, 1)
+    return tf.reduce_max(x, axis=-1, keepdims=True)
+
+@register_keras_serializable(package="cbam", name="spatial_output_shape")
+def spatial_output_shape(input_shape):
+    """
+    Một số Lambda trong file .keras của bạn đã lưu output_shape dưới dạng hàm.
+    Keras 3 sẽ gọi lại hàm này khi deserialize.
+    """
+    try:
+        shape = tf.TensorShape(input_shape).as_list()
+    except Exception:
+        shape = list(input_shape) if isinstance(input_shape, (list, tuple)) else input_shape
+    if isinstance(shape, (list, tuple)):
+        # Nếu input 4D: (B, H, W, C) -> (B, H, W, 1)
+        if len(shape) == 4:
+            return (shape[0], shape[1], shape[2], 1)
+        # Nếu input 3D: (H, W, C) -> (H, W, 1)
+        if len(shape) == 3:
+            return (shape[0], shape[1], 1)
+    return shape  # fallback
+
+CUSTOM_OBJECTS = {
+    "spatial_mean": spatial_mean,
+    "spatial_max": spatial_max,
+    "spatial_output_shape": spatial_output_shape,
+}
 
 # ==============================
 # 0) Patch lỗi NumPy BitGenerator khi load .pkl
@@ -124,7 +161,8 @@ def load_models():
     seg_model = load_model(
         os.path.join(MODEL_DIR, "best_model_cbam_attention_unet_fixed.keras"),
         compile=False,
-        custom_objects=CUSTOM_OBJECTS,   # <-- quan trọng
+        custom_objects=CUSTOM_OBJECTS,
+        safe_mode=False,  # <-- rất quan trọng để cho phép hàm tùy biến
     )
     class_model = load_model(
         os.path.join(MODEL_DIR, "Classifier_model_2.h5"),
