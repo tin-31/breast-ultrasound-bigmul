@@ -1,40 +1,32 @@
-import streamlit as st
 import os
-import sys
 import io
+import platform
+
 import gdown
 import numpy as np
 import pandas as pd
 import cv2
 import joblib
+import streamlit as st
 import altair as alt
-import keras
+
 import tensorflow as tf
-from PIL import Image
-from keras.saving import register_keras_serializable
+import keras
+from keras.models import load_model
+import sklearn
+import pickle
 
-
-# =========================================================
-# 0) Vá NumPy BitGenerator khi unpickle (.pkl) – fix PCG64
-# =========================================================
+# ==============================
+# 0) Patch lỗi NumPy BitGenerator khi load .pkl
+# ==============================
 def _patch_numpy_bitgenerator():
-    # Alias module nếu _pcg64 không tồn tại
-    try:
-        import numpy.random._pcg64  # noqa: F401
-    except Exception:
-        try:
-            import numpy.random._bit_generator as _bitgen
-            sys.modules['numpy.random._pcg64'] = _bitgen
-        except Exception:
-            pass
-
-    # Patch ctor để chấp nhận chuỗi module đầy đủ -> tên rút gọn
     try:
         from numpy.random import _pickle as _np_pickle
-        _orig_ctor = _np_pickle.__bit_generator_ctor
+        _orig = _np_pickle.__bit_generator_ctor
 
-        def _patched_ctor(bit_generator):
+        def _patched(bit_generator):
             if isinstance(bit_generator, str):
+                # đổi sang tên BitGenerator chuẩn trong NumPy mới
                 if bit_generator.endswith(".PCG64"):
                     bit_generator = "PCG64"
                 elif bit_generator.endswith(".PCG64DXSM"):
@@ -45,39 +37,45 @@ def _patch_numpy_bitgenerator():
                     bit_generator = "Philox"
                 elif bit_generator.endswith(".SFC64"):
                     bit_generator = "SFC64"
-            return _orig_ctor(bit_generator)
+            return _orig(bit_generator)
 
-        _np_pickle.__bit_generator_ctor = _patched_ctor
-    except Exception:
-        pass
+        _np_pickle.__bit_generator_ctor = _patched
+    except Exception as e:
+        print("Skip BitGenerator patch:", e)
 
+_patch_numpy_bitgenerator()
 
-# =========================================================
-# 1) Đăng ký các hàm CBAM dùng trong Lambda layers của model
-#    (đây là nguyên nhân lỗi "Could not locate function 'spatial_mean'")
-# =========================================================
-@register_keras_serializable(package="cbam", name="spatial_mean")
+# ==============================
+# 1) CUSTOM OBJECTS cho Lambda/CBAM trong model .keras
+# ==============================
+@keras.saving.register_keras_serializable(package="CBAM")
 def spatial_mean(x):
-    # (B,H,W,C) -> (B,H,W,1)
+    # channels_last => trục kênh là -1
     return tf.reduce_mean(x, axis=-1, keepdims=True)
 
-@register_keras_serializable(package="cbam", name="spatial_max")
+@keras.saving.register_keras_serializable(package="CBAM")
 def spatial_max(x):
     return tf.reduce_max(x, axis=-1, keepdims=True)
 
-@register_keras_serializable(package="cbam", name="channel_mean")
-def channel_mean(x):
-    # (B,H,W,C) -> (B,1,1,C)
-    return tf.reduce_mean(x, axis=[1, 2], keepdims=True)
+@keras.saving.register_keras_serializable(package="CBAM")
+def cbam_mult(x):
+    # x: [feature, attention]
+    return x[0] * x[1]
 
-@register_keras_serializable(package="cbam", name="channel_max")
-def channel_max(x):
-    return tf.reduce_max(x, axis=[1, 2], keepdims=True)
+@keras.saving.register_keras_serializable(package="CBAM")
+def cbam_mult2(x):
+    return x[0] * x[1]
 
+CUSTOM_OBJECTS = {
+    "spatial_mean": spatial_mean,
+    "spatial_max": spatial_max,
+    "cbam_mult": cbam_mult,
+    "cbam_mult2": cbam_mult2,
+}
 
-# =========================================================
-# 2) Download model files (1 lần) bằng gdown
-# =========================================================
+# ==============================
+# 2) Tải model từ Google Drive (1 lần)
+# ==============================
 MODEL_DIR = "models"
 os.makedirs(MODEL_DIR, exist_ok=True)
 
@@ -85,268 +83,273 @@ drive_files = {
     "Classifier_model_2.h5": "1fXPICuTkETep2oPiA56l0uMai2GusEJH",
     "best_model_cbam_attention_unet_fixed.keras": "1axOg7N5ssJrMec97eV-JMPzID26ynzN1",
     "clinical_epic_gb_model.pkl": "1z1wHVy9xyRXlRqxI8lYXMJhaJaUcKXnu",
-    "clinical_epic_gb_metadata.pkl": "1WWlfeRqr99VL4nBQ-7eEptIxitKtXj6V"
+    "clinical_epic_gb_metadata.pkl": "1WWlfeRqr99VL4nBQ-7eEptIxitKtXj6V",
 }
 
-with st.spinner("Downloading model files (if not already cached)..."):
-    for filename, file_id in drive_files.items():
-        dest_path = os.path.join(MODEL_DIR, filename)
-        if not os.path.exists(dest_path):
-            url = f"https://drive.google.com/uc?id={file_id}"
-            gdown.download(url, dest_path, quiet=False)
+with st.spinner("Đang kiểm tra & tải mô hình (lần đầu có thể hơi lâu)…"):
+    for fname, fid in drive_files.items():
+        dst = os.path.join(MODEL_DIR, fname)
+        if not os.path.exists(dst):
+            url = f"https://drive.google.com/uc?id={fid}"
+            gdown.download(url, dst, quiet=False)
 
+# ==============================
+# 3) Load models (cache)
+# ==============================
+def _joblib_load_robust(path: str):
+    try:
+        return joblib.load(path)
+    except Exception as e:
+        # fallback đổi tên module numpy cũ -> mới nếu cần
+        if "BitGenerator" in str(e) or "_pcg64" in str(e):
+            try:
+                with open(path, "rb") as f:
+                    data = f.read()
+                bio = io.BytesIO(data)
 
-# =========================================================
-# 3) Tiện ích ảnh
-# =========================================================
-def _get_input_hw(keras_model):
-    shp = keras_model.input_shape
-    if isinstance(shp, list):
-        shp = shp[0]
-    H, W, C = shp[1], shp[2], shp[3]
-    if H is None or W is None:
-        H = W = 256
-    if C is None:
-        C = 3
-    return int(H), int(W), int(C)
+                class _RenameUnpickler(pickle.Unpickler):
+                    def find_class(self, module, name):
+                        if module == "numpy.random._pcg64" and name == "PCG64":
+                            module = "numpy.random._bit_generator"
+                        if module == "numpy.random.bit_generator" and name == "BitGenerator":
+                            module = "numpy.random._bit_generator"
+                        return super().find_class(module, name)
+                return _RenameUnpickler(bio).load()
+            except Exception as e2:
+                raise e2
+        raise
 
-def _preprocess_for_model(img_pil: Image.Image, target_hw, to_rgb: bool) -> np.ndarray:
-    img = img_pil.convert("L")
-    img = img.resize((target_hw[1], target_hw[0]))  # (W,H)
-    arr = np.array(img).astype("float32") / 255.0
-    if to_rgb:
-        arr = np.stack([arr, arr, arr], axis=-1)  # (H,W,3)
-    else:
-        arr = np.expand_dims(arr, axis=-1)        # (H,W,1)
-    return np.expand_dims(arr, axis=0)            # (1,H,W,C)
-
-def _overlay_multiclass(orig_pil: Image.Image, mask: np.ndarray, alpha: float = 0.6) -> Image.Image:
-    base = orig_pil.convert("RGB")
-    base_np = np.array(base).astype(np.float32)
-
-    mask_img = Image.fromarray(mask.astype(np.uint8))
-    mask_resized = mask_img.resize(base.size, resample=Image.NEAREST)
-    m = np.array(mask_resized)
-
-    overlay = base_np.copy()
-    colors = {
-        1: np.array([0, 255, 0], dtype=np.float32),      # benign -> xanh
-        2: np.array([255, 0, 0], dtype=np.float32),      # malignant -> đỏ
-        3: np.array([255, 255, 0], dtype=np.float32),    # general lesion -> vàng
-    }
-    for cls_id, color in colors.items():
-        region = (m == cls_id)
-        if np.any(region):
-            overlay[region] = (1 - alpha) * overlay[region] + alpha * color
-
-    return Image.fromarray(np.clip(overlay, 0, 255).astype(np.uint8))
-
-
-# =========================================================
-# 4) Load models (có cache)
-# =========================================================
 @st.cache_resource
 def load_models():
-    # segmentation (CBAM + Lambda) cần custom_objects và safe_mode=False
-    custom_objs = {
-        "spatial_mean": spatial_mean,
-        "spatial_max": spatial_max,
-        "channel_mean": channel_mean,
-        "channel_max": channel_max,
-    }
-    seg_model = keras.models.load_model(
+    seg_model = load_model(
         os.path.join(MODEL_DIR, "best_model_cbam_attention_unet_fixed.keras"),
-        custom_objects=custom_objs,
         compile=False,
-        safe_mode=False,     # cho phép load object/lambda đã đăng ký
+        custom_objects=CUSTOM_OBJECTS,   # <-- quan trọng
     )
-
-    # classifier
-    class_model = keras.models.load_model(
+    class_model = load_model(
         os.path.join(MODEL_DIR, "Classifier_model_2.h5"),
         compile=False
     )
-
-    # clinical .pkl + meta (vá PCG64 trước khi load)
-    _patch_numpy_bitgenerator()
-    gb_model = joblib.load(os.path.join(MODEL_DIR, "clinical_epic_gb_model.pkl"))
-    gb_meta  = joblib.load(os.path.join(MODEL_DIR, "clinical_epic_gb_metadata.pkl"))
+    gb_model = _joblib_load_robust(os.path.join(MODEL_DIR, "clinical_epic_gb_model.pkl"))
+    gb_meta  = _joblib_load_robust(os.path.join(MODEL_DIR, "clinical_epic_gb_metadata.pkl"))
     return seg_model, class_model, gb_model, gb_meta
 
+seg_model, class_model, gb_model, gb_meta = load_models()
 
-try:
-    seg_model, class_model, gb_model, gb_meta = load_models()
-except Exception as e:
-    st.error(f"Lỗi khi tải mô hình: {e}")
-    seg_model = class_model = gb_model = gb_meta = None
+# ==============================
+# 4) Utils xử lý ảnh/overlay
+# ==============================
+def get_input_hwc(model):
+    shape = model.input_shape
+    if isinstance(shape, list):
+        shape = shape[0]
+    _, H, W, C = shape
+    H = 256 if H is None else int(H)
+    W = 256 if W is None else int(W)
+    C = 3   if C is None else int(C)
+    return H, W, C
 
+def prep_for_model(gray_uint8, target_hwc):
+    H, W, C = target_hwc
+    resized = cv2.resize(gray_uint8, (W, H), interpolation=cv2.INTER_LINEAR)
+    if C == 1:
+        x = resized.astype(np.float32) / 255.0
+        x = np.expand_dims(x, axis=(0, -1))
+    else:
+        x = cv2.cvtColor(resized, cv2.COLOR_GRAY2RGB).astype(np.float32) / 255.0
+        x = np.expand_dims(x, axis=0)
+    return x, resized
 
-# =========================================================
-# 5) Meta lâm sàng
-# =========================================================
-feature_names = []
-num_cols = []
-cat_cols = []
-label_map = {}
-inv_label_map = {}
-if gb_meta is not None:
-    feature_names = gb_meta.get("feature_names", [])
-    num_cols     = gb_meta.get("num_cols", [])
-    cat_cols     = gb_meta.get("cat_cols", [])
-    label_map    = gb_meta.get("label_map", {"Living": 0, "Deceased": 1})
-    inv_label_map = {v: k for k, v in label_map.items()}
+# màu overlay: 1= xanh (lành), 2= đỏ (ác), 3= vàng (general)
+SEG_COLORS = {
+    1: np.array([0, 255, 0], dtype=np.float32),
+    2: np.array([255, 0, 0], dtype=np.float32),
+    3: np.array([255, 255, 0], dtype=np.float32),
+}
 
+def overlay_multiclass(base_gray_uint8, mask_uint8, alpha=0.6):
+    base = np.stack([base_gray_uint8]*3, axis=-1).astype(np.float32)
+    over = base.copy()
+    for cls_id, color in SEG_COLORS.items():
+        m = (mask_uint8 == cls_id)
+        if np.any(m):
+            over[m] = (1 - alpha) * over[m] + alpha * color
+    return np.clip(over, 0, 255).astype(np.uint8)
 
-# =========================================================
-# 6) UI
-# =========================================================
+# ==============================
+# 5) UI
+# ==============================
+st.set_page_config(page_title="Breast Cancer Prediction App", layout="wide")
 st.title("Breast Cancer Prediction App")
-st.markdown(
-    "Web cho phép tải **ảnh siêu âm vú** để *phân loại* & *phân đoạn đa lớp*, "
-    "và nhập **thông tin lâm sàng** để *tiên lượng*. "
-    "Các mô hình sẽ tự tải bằng **gdown** (chỉ 1 lần)."
+
+# Hiển thị version để debug môi trường khi cần
+st.sidebar.markdown(
+    f"""
+**Versions**
+- Python: `{platform.python_version()}`
+- NumPy: `{np.__version__}`
+- scikit-learn: `{sklearn.__version__}`
+- TensorFlow: `{tf.__version__}`
+- Keras: `{keras.__version__}`
+"""
 )
 
 tab1, tab2 = st.tabs(["🔎 Ultrasound Image Analysis", "📊 Clinical Survival Prediction"])
 
-
-# ---------------- Tab 1: ẢNH ----------------
+# ---- Tab 1: Ảnh ----
 with tab1:
     st.header("Ultrasound Image Analysis")
-    uploaded_file = st.file_uploader("Choose an ultrasound image file (PNG/JPG)", type=["png", "jpg", "jpeg"])
+    uploaded = st.file_uploader("Choose an ultrasound image (PNG/JPG)", type=["png", "jpg", "jpeg"])
 
-    if uploaded_file is not None and (seg_model is not None and class_model is not None):
-        try:
-            img_pil = Image.open(uploaded_file).convert("L")
-        except Exception:
-            file_bytes = np.frombuffer(uploaded_file.read(), np.uint8)
-            img_cv = cv2.imdecode(file_bytes, cv2.IMREAD_GRAYSCALE)
-            if img_cv is None:
-                st.error("Could not read the image. Please upload a valid image file.")
-                st.stop()
-            img_pil = Image.fromarray(img_cv)
+    if uploaded is not None:
+        arr = np.frombuffer(uploaded.read(), np.uint8)
+        gray = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+        if gray is None:
+            st.error("Could not read the image. Please upload a valid image file.")
+        else:
+            gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
 
-        st.image(img_pil, caption="Original Image", use_column_width=True)
+            # Chuẩn bị input đúng kích thước/kênh của mỗi model
+            seg_hwc = get_input_hwc(seg_model)
+            clf_hwc = get_input_hwc(class_model)
+            x_seg, gray_seg = prep_for_model(gray, seg_hwc)
+            x_clf, gray_clf = prep_for_model(gray, clf_hwc)
 
-        # ----- Classification -----
-        st.subheader("📌 Classification")
-        Hc, Wc, Cc = _get_input_hw(class_model)
-        x_cls = _preprocess_for_model(img_pil, (Hc, Wc), to_rgb=True)  # (1,H,W,3)
-        with st.spinner("Predicting class..."):
-            class_probs = class_model.predict(x_cls, verbose=0)[0]
+            # ---- Segmentation (đa lớp) ----
+            with st.spinner("Running segmentation..."):
+                seg_pred = seg_model.predict(x_seg, verbose=0)[0]  # (H,W,K) hoặc (H,W,1)
 
-        class_names = ["benign", "malignant", "normal"]
-        if class_probs.shape[0] == 3:
+            if seg_pred.ndim == 3 and seg_pred.shape[-1] >= 3:
+                seg_mask = np.argmax(seg_pred, axis=-1).astype(np.uint8)  # 0..K-1
+            else:
+                seg_mask = (seg_pred[..., 0] >= 0.5).astype(np.uint8)     # fallback nhị phân
+                seg_mask[seg_mask == 1] = 3  # hiển thị màu vàng nếu chỉ có 1 lớp
+
+            overlay_img = overlay_multiclass(gray_seg, seg_mask, alpha=0.6)
+
+            # ---- Classification ----
+            with st.spinner("Running classification..."):
+                class_probs = class_model.predict(x_clf, verbose=0)[0]  # (3,)
+            class_names = ["benign", "malignant", "normal"]
             pred_idx = int(np.argmax(class_probs))
             pred_label = class_names[pred_idx]
-            st.write(f"**Classification Result:** **{pred_label.upper()}** (≈ {class_probs[pred_idx]:.2%})")
+            vi_map = {"benign": "U lành tính", "malignant": "U ác tính", "normal": "Bình thường"}
+
+            c1, c2 = st.columns(2)
+            with c1:
+                st.image(np.stack([gray_clf]*3, axis=-1), caption="Original (resized for classifier)", use_column_width=True)
+            with c2:
+                st.image(overlay_img, caption="Segmentation overlay (🟩 lành / 🟥 ác / 🟨 general)", use_column_width=True)
+
+            st.write(f"**Classification Result:** {vi_map.get(pred_label, pred_label)} (≈ {float(class_probs[pred_idx]):.2%})")
+
             probs_df = pd.DataFrame({
-                'Category': ['Benign', 'Malignant', 'Normal'],
-                'Probability (%)': (class_probs * 100).round(2)
+                "Category": ["Benign", "Malignant", "Normal"],
+                "Probability (%)": (class_probs * 100).round(2)
             })
             st.altair_chart(
                 alt.Chart(probs_df).mark_bar().encode(
-                    x=alt.X('Category', sort=None),
-                    y=alt.Y('Probability (%)', scale=alt.Scale(domain=[0, 100]))
+                    x=alt.X("Category", sort=None),
+                    y=alt.Y("Probability (%)", scale=alt.Scale(domain=[0, 100]))
                 ),
                 use_container_width=True
             )
-        else:
-            st.warning(f"Classifier output has {class_probs.shape[0]} classes. Raw: {class_probs}")
-
-        # ----- Segmentation (multiclass) -----
-        st.subheader("🧩 Multiclass Segmentation (CBAM U-Net)")
-        Hs, Ws, Cs = _get_input_hw(seg_model)
-        # nếu model phân đoạn cần 3 kênh, to_rgb=True; nếu 1 kênh, to_rgb=False
-        to_rgb_seg = (Cs == 3)
-        x_seg = _preprocess_for_model(img_pil, (Hs, Ws), to_rgb=to_rgb_seg)
-        with st.spinner("Segmenting..."):
-            seg_pred = seg_model.predict(x_seg, verbose=0)[0]   # (H,W,K) hoặc (H,W)
-
-        if seg_pred.ndim == 3 and seg_pred.shape[-1] >= 2:
-            seg_mask = np.argmax(seg_pred, axis=-1).astype(np.uint8)   # 0/1/2/(3)
-        elif seg_pred.ndim == 2:
-            seg_mask = (seg_pred >= 0.5).astype(np.uint8)
-        else:
-            st.error(f"Unsupported segmentation output shape: {seg_pred.shape}")
-            st.stop()
-
-        overlay_img = _overlay_multiclass(img_pil, seg_mask, alpha=0.6)
-        col1, col2 = st.columns(2)
-        with col1:
-            st.image(img_pil, caption="Original", use_column_width=True)
-        with col2:
-            st.image(overlay_img, caption="Overlay (🟥 ác / 🟩 lành / 🟨 general)", use_column_width=True)
-
-    elif uploaded_file is None:
-        st.info("Please upload a breast ultrasound image to analyze.")
     else:
-        st.error("Models not loaded. Please check logs.")
+        st.info("Please upload a breast ultrasound image to analyze.")
 
-
-# ---------------- Tab 2: LÂM SÀNG ----------------
+# ---- Tab 2: Lâm sàng ----
 with tab2:
     st.header("Clinical Survival Prediction")
-    st.write("Enter the patient's clinical information below. On submission, the model predicts survival outcome.")
+    try:
+        feature_names = gb_meta["feature_names"]
+        label_map     = gb_meta.get("label_map", {"Living": 0, "Deceased": 1})
+    except Exception as e:
+        st.warning(f"Clinical model metadata not available: {e}")
+        feature_names = None
 
-    if gb_model is None or gb_meta is None or not feature_names:
-        st.warning("Clinical model/metadata not loaded. Please check the error above or your requirements.")
-    else:
+    if feature_names is not None:
+        inv_label_map = {v: k for k, v in label_map.items()}
+
         with st.form("clinical_form"):
-            numeric_vals = {}
-            categorical_vals = {}
+            # Numeric
+            age           = st.number_input("Age at Diagnosis", min_value=0.0, max_value=120.0, value=50.0)
+            tumor_size    = st.number_input("Tumor Size (mm)", min_value=0.0, max_value=200.0, value=20.0)
+            lymph_pos     = st.number_input("Lymph nodes examined positive", min_value=0, max_value=50, value=0, step=1)
+            mutation_cnt  = st.number_input("Mutation Count", min_value=0, max_value=10000, value=0, step=1)
+            npi           = st.number_input("Nottingham prognostic index", min_value=0.0, max_value=10.0, value=4.0, format="%.2f")
+            os_months     = st.number_input("Overall Survival (Months)", min_value=0.0, max_value=300.0, value=60.0, format="%.2f")
 
-            st.markdown("**Numeric features**")
-            for c in num_cols:
-                numeric_vals[c] = st.text_input(c, value="")
-
-            st.markdown("---")
-            st.markdown("**Categorical features**")
-            for c in cat_cols:
-                categorical_vals[c] = st.text_input(c, value="")
+            # Categorical
+            surgery_type  = st.selectbox("Type of Breast Surgery", ["Breast Conserving", "Mastectomy"], index=0)
+            hist_grade    = st.selectbox("Neoplasm Histologic Grade", [1, 2, 3], index=0)
+            tumor_stage   = st.selectbox("Tumor Stage", [1, 2, 3, 4], index=0)
+            sex           = st.selectbox("Sex", ["Female", "Male"], index=0)
+            cellularity   = st.selectbox("Cellularity", ["High", "Low", "Moderate"], index=0)
+            chemo         = st.selectbox("Chemotherapy", ["No", "Yes"], index=0)
+            hormone       = st.selectbox("Hormone Therapy", ["No", "Yes"], index=0)
+            radio         = st.selectbox("Radio Therapy", ["No", "Yes"], index=0)
+            er_status     = st.selectbox("ER Status", ["Negative", "Positive"], index=0)
+            pr_status     = st.selectbox("PR Status", ["Negative", "Positive"], index=0)
+            her2_status   = st.selectbox("HER2 Status", ["Negative", "Positive"], index=0)
+            gene_subtype  = st.selectbox("3-Gene classifier subtype",
+                                         ["ER+/HER2+", "ER+/HER2- High Prolif", "ER+/HER2- Low Prolif", "ER-/HER2+", "ER-/HER2-"], index=0)
+            pam50_subtype = st.selectbox("Pam50 + Claudin-low subtype",
+                                         ["Basal-like", "Claudin-low", "HER2-enriched", "Luminal A", "Luminal B", "Normal-like"], index=0)
+            relapse_status = st.selectbox("Relapse Free Status", ["Not Recurred", "Recurred"], index=0)
 
             submit_btn = st.form_submit_button("Predict Survival")
 
         if submit_btn:
-            def build_clinical_input_row(meta, user_num, user_cat):
-                row = {}
-                for col in meta.get("num_cols", []):
-                    v = user_num.get(col, None)
-                    if v is None or v == "":
-                        row[col] = np.nan
-                    else:
-                        try:
-                            row[col] = float(v)
-                        except Exception:
-                            row[col] = np.nan
-                for col in meta.get("cat_cols", []):
-                    v = user_cat.get(col, "")
-                    row[col] = "Unknown" if (v is None or v == "") else str(v)
+            X = pd.DataFrame([np.zeros(len(feature_names))], columns=feature_names)
 
-                df_raw = pd.DataFrame([row])
-                df_ohe = pd.get_dummies(df_raw, columns=meta.get("cat_cols", []))
-                X = df_ohe.reindex(columns=meta.get("feature_names", []), fill_value=0)
-                return X
+            # Numeric
+            for col, val in {
+                "Age at Diagnosis": age,
+                "Tumor Size": tumor_size,
+                "Lymph nodes examined positive": lymph_pos,
+                "Mutation Count": mutation_cnt,
+                "Nottingham prognostic index": npi,
+                "Overall Survival (Months)": os_months
+            }.items():
+                if col in X.columns:
+                    X.at[0, col] = val
 
-            try:
-                X_input = build_clinical_input_row(gb_meta, numeric_vals, categorical_vals)
-                y_pred = gb_model.predict(X_input)[0]
-                outcome_label = inv_label_map.get(int(y_pred), str(y_pred))
+            # Helper cho one-hot theo đúng tên cột
+            def set_dummy(col, val):
+                dummy = f"{col}_{val}"
+                if isinstance(val, (int, float)) and dummy not in X.columns and f"{col}_{val}.0" in X.columns:
+                    dummy = f"{col}_{val}.0"
+                if dummy in X.columns:
+                    X.at[0, dummy] = 1
 
-                living_p = deceased_p = None
-                if hasattr(gb_model, "predict_proba"):
-                    proba = gb_model.predict_proba(X_input)[0]
-                    living_p = float(proba[label_map.get("Living", 0)]) if proba.shape[0] == 2 else None
-                    deceased_p = float(proba[label_map.get("Deceased", 1)]) if proba.shape[0] == 2 else None
+            # Categorical one-hot
+            set_dummy("Type of Breast Surgery", surgery_type)
+            set_dummy("Neoplasm Histologic Grade", hist_grade)
+            set_dummy("Tumor Stage", tumor_stage)
+            set_dummy("Sex", sex)
+            set_dummy("Cellularity", cellularity)
+            set_dummy("Chemotherapy", chemo)
+            set_dummy("Hormone Therapy", hormone)
+            set_dummy("Radio Therapy", radio)
+            set_dummy("ER Status", er_status)
+            set_dummy("PR Status", pr_status)
+            set_dummy("HER2 Status", her2_status)
+            set_dummy("3-Gene classifier subtype", gene_subtype)
+            set_dummy("Pam50 + Claudin-low subtype", pam50_subtype)
+            set_dummy("Relapse Free Status", relapse_status)
 
-                if outcome_label == "Deceased":
-                    st.error(f"**Predicted Outcome:** {outcome_label}")
-                else:
-                    st.success(f"**Predicted Outcome:** {outcome_label}")
+            # Dự đoán
+            y_pred = gb_model.predict(X)[0]
+            label_map = gb_meta.get("label_map", {"Living": 0, "Deceased": 1})
+            inv_label_map = {v: k for k, v in label_map.items()}
+            outcome = inv_label_map.get(int(y_pred), str(y_pred))
+            death_prob = None
+            if hasattr(gb_model, "predict_proba"):
+                death_prob = float(gb_model.predict_proba(X)[0, label_map.get("Deceased", 1)])
 
-                if living_p is not None and deceased_p is not None:
-                    st.write(f"- Probability **Living**: {living_p:.2%}")
-                    st.write(f"- Probability **Deceased**: {deceased_p:.2%}")
-
-            except Exception as e:
-                st.error(f"Lỗi khi chạy tiên lượng: {e}")
+            if outcome == "Deceased":
+                st.error(f"**Predicted Outcome:** {outcome}")
+            else:
+                st.success(f"**Predicted Outcome:** {outcome}")
+            if death_prob is not None:
+                st.write(f"**Probability of death:** {death_prob*100:.1f}%")
