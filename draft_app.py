@@ -300,13 +300,16 @@ elif chon_trang == "Ứng dụng":
     labels_clf = ["benign", "malignant", "normal"]
     vi_map = {"benign": "U lành tính", "malignant": "U ác tính", "normal": "Bình thường"}
 
-    # 📌 Do kích thước lớn, mình chỉ gửi block thay thế phần xử lý ảnh 2D → thêm hỗ trợ ảnh 3D
+    # 📌 Do kích thước lớn, mình chỉ gửi block thay thế phần xử lý ảnh 2D → thêm hỗ trợ ảnh 3D và DICOM (.dcm)
 # Bạn chỉ cần thay thế đoạn xử lý ở mục "7.1 PHÂN TÍCH ẢNH SIÊU ÂM" trong app gốc
-# --- THAY TOÀN BỘ ĐOẠN SAU: upload = st.file_uploader(...) cho đến hết khối xử lý ảnh siêu âm ---
 
 import nibabel as nib
+import pydicom
+from pydicom.pixel_data_handlers.util import apply_voi_lut
 import tempfile
+from pathlib import Path
 
+# --- Hàm hỗ trợ đọc NIfTI ---
 def load_nifti_slice(file, slice_strategy="middle"):
     img = nib.load(file)
     vol = img.get_fdata()
@@ -318,25 +321,36 @@ def load_nifti_slice(file, slice_strategy="middle"):
         slice_img = vol[:, :, idx]
     return slice_img.astype(np.uint8)
 
+# --- Hàm hỗ trợ đọc DICOM ---
+def load_dicom_slice(file):
+    ds = pydicom.dcmread(file)
+    arr = apply_voi_lut(ds.pixel_array, ds)
+    arr = arr.astype(np.float32)
+    arr = (arr - arr.min()) / (arr.max() - arr.min()) * 255
+    return arr.astype(np.uint8)
+
+# --- Tự động đọc ảnh 3D từ .nii/.gz hoặc DICOM .dcm ---
 def load_3d_slice(upload):
-    suffix = Path(upload.name).suffix
+    suffix = Path(upload.name).suffix.lower()
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
         tmp.write(upload.read())
         tmp_path = tmp.name
     try:
         if suffix in [".nii", ".gz"]:
             return load_nifti_slice(tmp_path), "3D"
+        elif suffix == ".dcm":
+            return load_dicom_slice(tmp_path), "DICOM"
         else:
             st.error("❌ Định dạng ảnh 3D chưa hỗ trợ đọc.")
             return None, None
     except Exception as e:
-        st.error(f"❌ Không thể đọc ảnh 3D: {e}")
+        st.error(f"❌ Không thể đọc ảnh: {e}")
         return None, None
 
 # ------------------------------
-# Tải ảnh 2D hoặc lát cắt 3D
-upload = st.file_uploader("📤 Chọn ảnh siêu âm (PNG/JPG hoặc NIfTI .nii/.gz)",
-                          ["png", "jpg", "jpeg", "nii", "nii.gz"])
+# Tải ảnh 2D hoặc 3D/DICOM
+upload = st.file_uploader("📤 Chọn ảnh siêu âm (PNG/JPG hoặc NIfTI .nii/.gz hoặc DICOM .dcm)",
+                          ["png", "jpg", "jpeg", "nii", "nii.gz", "dcm"])
 
 if upload:
     suffix = Path(upload.name).suffix.lower()
@@ -344,7 +358,7 @@ if upload:
         arr = np.frombuffer(upload.read(), np.uint8)
         gray = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
         is_3d = False
-    elif suffix in [".nii", ".gz"]:
+    elif suffix in [".nii", ".gz", ".dcm"]:
         gray, dim = load_3d_slice(upload)
         is_3d = True
     else:
