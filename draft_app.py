@@ -300,64 +300,98 @@ elif chon_trang == "Ứng dụng":
     labels_clf = ["benign", "malignant", "normal"]
     vi_map = {"benign": "U lành tính", "malignant": "U ác tính", "normal": "Bình thường"}
 
-    # ---------------------------------------------
-    # 7.1 PHÂN TÍCH ẢNH SIÊU ÂM
-    # ---------------------------------------------
-    st.subheader("📷 Phân tích ảnh siêu âm")
+    # 📌 Do kích thước lớn, mình chỉ gửi block thay thế phần xử lý ảnh 2D → thêm hỗ trợ ảnh 3D
+# Bạn chỉ cần thay thế đoạn xử lý ở mục "7.1 PHÂN TÍCH ẢNH SIÊU ÂM" trong app gốc
+# --- THAY TOÀN BỘ ĐOẠN SAU: upload = st.file_uploader(...) cho đến hết khối xử lý ảnh siêu âm ---
 
-    upload = st.file_uploader("📤 Chọn ảnh siêu âm (định dạng PNG/JPG/JPEG)", ["png", "jpg", "jpeg"])
+import nibabel as nib
+import tempfile
 
-    if upload:
+def load_nifti_slice(file, slice_strategy="middle"):
+    img = nib.load(file)
+    vol = img.get_fdata()
+    mid = vol.shape[2] // 2
+    if slice_strategy == "middle":
+        slice_img = vol[:, :, mid]
+    elif slice_strategy == "max_std":
+        idx = np.argmax([np.std(vol[:, :, i]) for i in range(vol.shape[2])])
+        slice_img = vol[:, :, idx]
+    return slice_img.astype(np.uint8)
+
+def load_3d_slice(upload):
+    suffix = Path(upload.name).suffix
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(upload.read())
+        tmp_path = tmp.name
+    try:
+        if suffix in [".nii", ".gz"]:
+            return load_nifti_slice(tmp_path), "3D"
+        else:
+            st.error("❌ Định dạng ảnh 3D chưa hỗ trợ đọc.")
+            return None, None
+    except Exception as e:
+        st.error(f"❌ Không thể đọc ảnh 3D: {e}")
+        return None, None
+
+# ------------------------------
+# Tải ảnh 2D hoặc lát cắt 3D
+upload = st.file_uploader("📤 Chọn ảnh siêu âm (PNG/JPG hoặc NIfTI .nii/.gz)",
+                          ["png", "jpg", "jpeg", "nii", "nii.gz"])
+
+if upload:
+    suffix = Path(upload.name).suffix.lower()
+    if suffix in [".png", ".jpg", ".jpeg"]:
         arr = np.frombuffer(upload.read(), np.uint8)
         gray = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
-        if gray is None:
-            st.error("❌ Không đọc được ảnh. Vui lòng chọn file ảnh hợp lệ.")
-        else:
-            gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
-
-            # Chuẩn bị input cho 2 model
-            x_seg, g_seg = prep(gray, get_input_hwc(seg_model))
-            x_clf, g_clf = prep(gray, get_input_hwc(class_model))
-
-            # Phân đoạn
-            seg_pred = seg_model.predict(x_seg, verbose=0)[0]
-            mask = np.argmax(seg_pred, -1).astype(np.uint8)
-            overlay_img = overlay(g_seg, mask)
-
-            # Phân loại
-            probs = class_model.predict(x_clf, verbose=0)[0]
-            idx = int(np.argmax(probs))
-
-            image_pred_label_en = labels_clf[idx]
-            image_pred_label_vi = vi_map[image_pred_label_en]
-            image_pred_probs = probs
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.image(g_clf, caption="Ảnh siêu âm (đã chuẩn hóa)", use_column_width=True)
-            with col2:
-                st.image(overlay_img, caption="Kết quả phân đoạn (Xanh: lành, Đỏ: ác)", use_column_width=True)
-
-            st.success(f"🔍 Mô hình hình ảnh dự đoán: **{image_pred_label_vi}** "
-                       f"({probs[idx]*100:.1f}%)")
-
-            df_img = pd.DataFrame({
-                "Nhóm": ["Lành tính", "Ác tính", "Bình thường"],
-                "Xác suất (%)": (probs * 100).round(2)
-            })
-
-            st.altair_chart(
-                alt.Chart(df_img)
-                .mark_bar()
-                .encode(
-                    x="Nhóm",
-                    y="Xác suất (%)",
-                    tooltip=["Nhóm", "Xác suất (%)"],
-                ),
-                use_container_width=True,
-            )
+        is_3d = False
+    elif suffix in [".nii", ".gz"]:
+        gray, dim = load_3d_slice(upload)
+        is_3d = True
     else:
-        st.info("👆 Hãy tải lên một ảnh siêu âm để mô hình tiến hành minh họa.")
+        st.error("❌ Định dạng ảnh không được hỗ trợ.")
+        gray = None
+
+    if gray is not None:
+        st.info(f"📁 Hệ thống phát hiện ảnh {'3D' if is_3d else '2D'} – đang xử lý...")
+        gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+
+        x_seg, g_seg = prep(gray, get_input_hwc(seg_model))
+        x_clf, g_clf = prep(gray, get_input_hwc(class_model))
+
+        seg_pred = seg_model.predict(x_seg, verbose=0)[0]
+        mask = np.argmax(seg_pred, -1).astype(np.uint8)
+        overlay_img = overlay(g_seg, mask)
+
+        probs = class_model.predict(x_clf, verbose=0)[0]
+        idx = int(np.argmax(probs))
+
+        image_pred_label_en = labels_clf[idx]
+        image_pred_label_vi = vi_map[image_pred_label_en]
+        image_pred_probs = probs
+
+        col1, col2 = st.columns(2)
+        with col1:
+            st.image(g_clf, caption="Ảnh đầu vào (chuẩn hóa)", use_column_width=True)
+        with col2:
+            st.image(overlay_img, caption="Kết quả phân đoạn", use_column_width=True)
+
+        st.success(f"🔍 Mô hình hình ảnh dự đoán: **{image_pred_label_vi}** ({probs[idx]*100:.1f}%)")
+
+        df_img = pd.DataFrame({
+            "Nhóm": ["Lành tính", "Ác tính", "Bình thường"],
+            "Xác suất (%)": (probs * 100).round(2)
+        })
+
+        st.altair_chart(
+            alt.Chart(df_img).mark_bar().encode(
+                x="Nhóm",
+                y="Xác suất (%)",
+                tooltip=["Nhóm", "Xác suất (%)"],
+            ),
+            use_container_width=True,
+        )
+else:
+    st.info("👆 Hãy tải lên một ảnh siêu âm để mô hình tiến hành minh họa.")
 
     # ---------------------------------------------
     # 7.2 MÔ HÌNH LÂM SÀNG (RANDOMFOREST)
