@@ -1,3 +1,9 @@
+# ==========================================
+# 🩺 ỨNG DỤNG TRÍ TUỆ NHÂN TẠO HỖ TRỢ PHÂN TÍCH ẢNH SIÊU ÂM VÚ
+# ==========================================
+# ⚠️ Phiên bản dành cho nghiên cứu học thuật - Không sử dụng cho mục đích y tế thực tế.
+# ⚠️ Ứng dụng này chỉ mang tính minh họa kỹ thuật và học thuật.
+
 import os
 import json
 
@@ -9,30 +15,38 @@ import streamlit as st
 import altair as alt
 
 import tensorflow as tf
+import keras
 from keras.models import load_model
 from keras.saving import register_keras_serializable
 
 import joblib
 
+# =====================================================
+# ⚙️ CẤU HÌNH CHUNG
+# =====================================================
+
+st.set_page_config(
+    page_title="AI Phân tích Siêu âm Vú",
+    layout="wide",
+    page_icon="🩺"
+)
+
+# Cho phép load model cũ (Keras < 3)
+try:
+    keras.config.enable_unsafe_deserialization()
+except Exception:
+    pass
 
 # ============================
-# 0) STREAMLIT CONFIG
-# ============================
-st.set_page_config(page_title="Breast Cancer App", layout="wide")
-
-
-# ============================
-# 1) CUSTOM OBJECTS CBAM
+# 0) CUSTOM OBJECTS CHO CBAM
 # ============================
 @register_keras_serializable(package="cbam", name="spatial_mean")
 def spatial_mean(x):
     return tf.reduce_mean(x, axis=-1, keepdims=True)
 
-
 @register_keras_serializable(package="cbam", name="spatial_max")
 def spatial_max(x):
     return tf.reduce_max(x, axis=-1, keepdims=True)
-
 
 @register_keras_serializable(package="cbam", name="spatial_output_shape")
 def spatial_output_shape(input_shape):
@@ -46,86 +60,79 @@ def spatial_output_shape(input_shape):
         return (shape[0], shape[1], 1)
     return shape
 
-
 CUSTOM_OBJECTS = {
     "spatial_mean": spatial_mean,
     "spatial_max": spatial_max,
     "spatial_output_shape": spatial_output_shape,
 }
 
-
 # ============================
-# 2) DOWNLOAD MODELS
+# 1) TẢI MÔ HÌNH TỪ GOOGLE DRIVE
 # ============================
 MODEL_DIR = "models"
-os.makedirs(MODEL_DIR, exist_ok=True)
 
 drive_files = {
-    # Segmentation + Classification
+    # Mô hình phân loại + phân đoạn ảnh siêu âm
     "Classifier_model_2.h5": "1fXPICuTkETep2oPiA56l0uMai2GusEJH",
     "best_model_cbam_attention_unet_fixed.keras": "1axOg7N5ssJrMec97eV-JMPzID26ynzN1",
 
-    # Clinical RandomForest
+    # Mô hình lâm sàng RandomForest + metadata
     "clinical_rf_model.joblib": "1zHBB05rVUK7H9eZ9y5N9stUZnhzYBafc",
     "clinical_rf_metadata.json": "1KHZWZXs8QV8jLNXBkAVsQa_DN3tHuXtx",
 }
 
-with st.spinner("⏳ Downloading models..."):
+def download_models():
+    os.makedirs(MODEL_DIR, exist_ok=True)
     for fname, fid in drive_files.items():
         path = os.path.join(MODEL_DIR, fname)
         if not os.path.exists(path):
             url = f"https://drive.google.com/uc?id={fid}"
+            st.info(f"📥 Đang tải mô hình: `{fname}` ...")
             gdown.download(url, path, quiet=False)
-
+            st.success(f"✅ Đã tải xong {fname}")
 
 # ============================
-# 3) LOAD MODELS
+# 2) LOAD CÁC MÔ HÌNH
 # ============================
 @st.cache_resource
 def load_all_models():
-    # Segmentation
+    """Load mô hình phân đoạn, phân loại và mô hình lâm sàng."""
     seg_model = load_model(
         os.path.join(MODEL_DIR, "best_model_cbam_attention_unet_fixed.keras"),
         compile=False,
         custom_objects=CUSTOM_OBJECTS,
-        safe_mode=False,
+        safe_mode=False
     )
 
-    # Classification
     class_model = load_model(
         os.path.join(MODEL_DIR, "Classifier_model_2.h5"),
-        compile=False,
+        compile=False
     )
 
-    # Clinical (joblib)
     clinical_model = None
     clinical_meta = None
-
     try:
         clinical_model = joblib.load(os.path.join(MODEL_DIR, "clinical_rf_model.joblib"))
         with open(os.path.join(MODEL_DIR, "clinical_rf_metadata.json"), "r") as f:
             clinical_meta = json.load(f)
     except Exception as e:
-        st.error(f"❌ Could not load clinical RF model: {e}")
+        st.error(f"❌ Không thể load mô hình lâm sàng: {e}")
 
     return seg_model, class_model, clinical_model, clinical_meta
 
-
-seg_model, class_model, clinical_model, clinical_meta = load_all_models()
-
-
 # ============================
-# 4) IMAGE PROCESSING UTILS
+# 3) HÀM XỬ LÝ ẢNH
 # ============================
 def get_input_hwc(model):
+    """Lấy kích thước (H, W, C) của input model Keras."""
     shape = model.input_shape
     if isinstance(shape, list):
         shape = shape[0]
     _, H, W, C = shape
     return int(H), int(W), int(C)
 
-
 def prep(gray, target_shape):
+    """Resize & chuẩn hóa ảnh xám theo kích thước model."""
     H, W, C = target_shape
     resized = cv2.resize(gray, (W, H))
     if C == 1:
@@ -136,14 +143,13 @@ def prep(gray, target_shape):
         x = np.expand_dims(x, 0)
     return x, resized
 
-
-COLOR_B = np.array([0, 255, 0], np.float32)
-COLOR_M = np.array([255, 0, 0], np.float32)
-COLOR_G = (0, 255, 255)
-
+COLOR_B = np.array([0, 255, 0], np.float32)   # Lành: xanh lá
+COLOR_M = np.array([255, 0, 0], np.float32)   # Ác: đỏ
+COLOR_G = (0, 255, 255)                       # Viền tổng: vàng
 
 def overlay(gray, mask, alpha=0.6):
-    base = np.stack([gray] * 3, axis=-1).astype(np.float32)
+    """Vẽ lớp mask (1: lành, 2: ác) chồng lên ảnh xám."""
+    base = np.stack([gray]*3, axis=-1).astype(np.float32)
     out = base.copy()
 
     ben = mask == 1
@@ -163,249 +169,380 @@ def overlay(gray, mask, alpha=0.6):
 
     return out.clip(0, 255).astype(np.uint8)
 
-
-# ============================
-# 5) MAIN APP UI (COMBINED)
-# ============================
-st.title("🩺 Breast Cancer Prediction App")
-st.write(
-    "Ứng dụng hỗ trợ bác sĩ: phân tích **siêu âm vú** + "
-    "**dữ liệu lâm sàng** và hiển thị đánh giá tổng hợp (chỉ mang tính tham khảo, không thay thế chẩn đoán của bác sĩ)."
+# =====================================================
+# 4) SIDEBAR & CHỌN TRANG
+# =====================================================
+st.sidebar.title("📘 Danh mục")
+chon_trang = st.sidebar.selectbox(
+    "Chọn nội dung hiển thị",
+    ["Ứng dụng", "Giới thiệu", "Nguồn dữ liệu & Bản quyền"]
 )
 
-# Các biến để kết hợp kết quả
-image_pred_label_en = None
-image_pred_label_vi = None
-image_pred_probs = None
+# =====================================================
+# 5) TRANG 2: GIỚI THIỆU
+# =====================================================
+if chon_trang == "Giới thiệu":
+    st.title("👩‍⚕️ ỨNG DỤNG AI HỖ TRỢ PHÂN TÍCH ẢNH SIÊU ÂM VÚ")
 
-clinical_pred_label = None
-clinical_prob_death = None
+    st.markdown("""
+### 🎯 Mục tiêu
+
+Ứng dụng này được xây dựng với mục đích **nghiên cứu học thuật** trong lĩnh vực:
+
+- Trí tuệ nhân tạo (AI)  
+- Học sâu (Deep Learning)  
+- Y học hình ảnh (Medical Imaging)  
+
+Cụ thể, ứng dụng minh họa cách:
+- Phân đoạn khối u trên **ảnh siêu âm tuyến vú** bằng mạng U-Net có cơ chế chú ý (CBAM).
+- Phân loại khối u thành **lành tính / ác tính / bình thường**.
+- Kết hợp thêm mô hình **dữ liệu lâm sàng** (RandomForest) để **hỗ trợ đánh giá nguy cơ**.
+- Đưa ra **nhận định tổng hợp** từ cả hai mô hình (hình ảnh + lâm sàng).
+
+---
+
+### ⚠️ Lưu ý quan trọng
+
+- Đây **không phải** là công cụ chẩn đoán y khoa thực tế.  
+- Kết quả từ mô hình chỉ mang tính **minh họa kỹ thuật** và **hỗ trợ học thuật**.  
+- **Tuyệt đối không** sử dụng kết quả từ ứng dụng này để:
+  - Tự chẩn đoán bệnh.
+  - Tự ý điều trị.
+  - Thay thế ý kiến hay chỉ định của bác sĩ chuyên khoa.
+
+---
+
+### 🧪 Đối tượng sử dụng
+
+- Học sinh, sinh viên, nhà nghiên cứu quan tâm đến AI trong y tế.  
+- Người muốn tìm hiểu quy trình: **tiền xử lý ảnh → mô hình AI → diễn giải kết quả**.  
+
+---
+
+📌 **Tóm lại:**  
+Ứng dụng này là một **mô hình nghiên cứu** (proof-of-concept) về AI trong chẩn đoán hình ảnh, không phải sản phẩm y tế lâm sàng.
+""")
 
 # =====================================================
-# 5.1 PHÂN TÍCH HÌNH ẢNH
+# 6) TRANG 3: NGUỒN DỮ LIỆU & BẢN QUYỀN
 # =====================================================
-st.header("🔎 Ultrasound Image Analysis")
+elif chon_trang == "Nguồn dữ liệu & Bản quyền":
+    st.title("📊 Nguồn dữ liệu và bản quyền sử dụng")
 
-upload = st.file_uploader("Upload ảnh siêu âm (PNG/JPG)", ["png", "jpg", "jpeg"])
+    st.markdown("""
+Ứng dụng sử dụng dữ liệu từ **các nguồn công khai** phục vụ mục đích **nghiên cứu phi thương mại**:
 
-if upload:
-    arr = np.frombuffer(upload.read(), np.uint8)
-    gray = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
-    gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+| Nguồn dữ liệu | Loại dữ liệu | Liên kết |
+|---------------|-------------|---------|
+| **BUSI – Breast Ultrasound Images Dataset** (Arya Shah, Kaggle) | Ảnh siêu âm tuyến vú | [Mở liên kết](https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset) |
+| **BUS-UCLM Breast Ultrasound Dataset** (Orvile, Kaggle) | Ảnh siêu âm tuyến vú | [Mở liên kết](https://www.kaggle.com/datasets/orvile/bus-uclm-breast-ultrasound-dataset) |
+| **Breast Lesions USG (TCIA)** | Ảnh siêu âm tổn thương vú | [Mở liên kết](https://www.cancerimagingarchive.net/collection/breast-lesions-usg/) |
+| **Breast Cancer Clinical Data** (Mendeley Data) | Dữ liệu lâm sàng ung thư vú | [Mở liên kết](https://data.mendeley.com/datasets/dbz42w9x8h/2) |
 
-    # Chuẩn bị input cho 2 model
-    x_seg, g_seg = prep(gray, get_input_hwc(seg_model))
-    x_clf, g_clf = prep(gray, get_input_hwc(class_model))
+---
 
-    # Segmentation
-    seg_pred = seg_model.predict(x_seg, verbose=0)[0]
-    mask = np.argmax(seg_pred, -1).astype(np.uint8)
-    overlay_img = overlay(g_seg, mask)
+### 📄 Giấy phép & phạm vi sử dụng
 
-    # Classification
-    probs = class_model.predict(x_clf, verbose=0)[0]
-    labels = ["benign", "malignant", "normal"]
-    vi_map = {"benign": "U lành", "malignant": "U ác", "normal": "Bình thường"}
-    idx = int(np.argmax(probs))
+- Dữ liệu được sử dụng trong ứng dụng này **chỉ nhằm mục đích nghiên cứu khoa học và giáo dục**.
+- Không sử dụng cho:
+  - Mục đích thương mại.
+  - Các hệ thống chẩn đoán y tế triển khai thực tế.
+- Khi trích dẫn hoặc sử dụng lại dữ liệu, cần tuân thủ:
+  - Điều khoản giấy phép ghi rõ trên từng trang dataset.
+  - Trích dẫn tác giả/bộ sưu tập dữ liệu gốc.
 
-    image_pred_label_en = labels[idx]
-    image_pred_label_vi = vi_map[image_pred_label_en]
-    image_pred_probs = probs
+---
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.image(g_clf, caption="Input Ultrasound Image", use_column_width=True)
-    with col2:
-        st.image(overlay_img, caption="Segmentation Result", use_column_width=True)
+### 📚 Gợi ý trích dẫn (APA, tham khảo)
 
-    st.success(f"Kết quả mô hình hình ảnh: **{image_pred_label_vi}** ({probs[idx] * 100:.1f}%)")
+- Shah, A. (2020). *Breast Ultrasound Images Dataset* [Dataset]. Kaggle.  
+- Orvile. (2023). *BUS-UCLM Breast Ultrasound Dataset* [Dataset]. Kaggle.  
+- The Cancer Imaging Archive. (2021). *Breast Lesions USG* [Dataset].  
+- Mendeley Data (n.d.). *Breast Cancer Clinical Data* [Dataset]. Mendeley.  
 
-    df_img = pd.DataFrame(
-        {
-            "Category": ["Benign", "Malignant", "Normal"],
-            "Probability (%)": (probs * 100).round(2),
-        }
-    )
+---
 
-    st.altair_chart(
-        alt.Chart(df_img)
-        .mark_bar()
-        .encode(
-            x="Category",
-            y="Probability (%)",
-            tooltip=["Category", "Probability (%)"],
-        ),
-        use_container_width=True,
-    )
-else:
-    st.info("Vui lòng tải ảnh siêu âm để mô hình xử lý.")
-
+🧾 **Tuyên bố bản quyền & miễn trừ trách nhiệm:**  
+- Ứng dụng này không sở hữu bản quyền dữ liệu gốc, chỉ sử dụng lại theo đúng giấy phép của tác giả.  
+- Tác giả ứng dụng **không chịu trách nhiệm** cho bất kỳ việc sử dụng sai mục đích nào từ phía người dùng.
+""")
 
 # =====================================================
-# 5.2 DỰ ĐOÁN LÂM SÀNG
+# 7) TRANG 1: ỨNG DỤNG CHÍNH (ẢNH + LÂM SÀNG)
 # =====================================================
-st.header("📊 Clinical Survival Prediction")
+elif chon_trang == "Ứng dụng":
+    st.title("🩺 ỨNG DỤNG AI MINH HỌA PHÂN TÍCH SIÊU ÂM VÚ")
+    st.markdown("""
+Ứng dụng cho phép:
+1. 📷 Tải lên **ảnh siêu âm tuyến vú** để mô hình:
+   - Phân đoạn vùng nghi ngờ.
+   - Phân loại: **Lành tính / Ác tính / Bình thường**.
+2. 📊 Nhập **thông tin lâm sàng cơ bản** để mô hình RandomForest dự đoán **kết cục sống còn**.
+3. 🧠 Xem **đánh giá tổng hợp** được kết hợp từ cả hai mô hình.
 
-if clinical_model is None or clinical_meta is None:
-    st.error("❌ Clinical model not loaded – kiểm tra lại file joblib/json.")
-else:
-    feature_names = clinical_model.feature_names_in_
-    label_map = clinical_meta["label_map"]  # ví dụ: {"Alive": 0, "Deceased": 1}
-    inv_label = {v: k for k, v in label_map.items()}
+> ⚠️ Kết quả chỉ mang tính **minh họa học thuật**, không sử dụng cho chẩn đoán y khoa thực tế.
+""")
 
-    with st.form("clinical_form"):
-        col_a, col_b, col_c = st.columns(3)
+    # Tải & load mô hình
+    with st.spinner("🔧 Đang chuẩn bị mô hình..."):
+        download_models()
+        seg_model, class_model, clinical_model, clinical_meta = load_all_models()
 
-        with col_a:
-            age = st.number_input("Age at Diagnosis", 0, 120, 50)
-            size = st.number_input("Tumor Size", 0, 200, 20)
-            lymph = st.number_input("Lymph nodes examined positive", 0, 50, 0)
-            mut = st.number_input("Mutation Count", 0, 10000, 0)
-            npi = st.number_input("Nottingham prognostic index", 0.0, 10.0, 4.0)
-            os_m = st.number_input("Overall Survival (Months)", 0.0, 300.0, 60.0)
+    if clinical_model is None or clinical_meta is None:
+        st.error("❌ Không thể tải đầy đủ mô hình lâm sàng. Vui lòng kiểm tra lại file mô hình.")
+    
+    # Biến lưu kết quả để dùng cho phần kết hợp
+    image_pred_label_en = None
+    image_pred_label_vi = None
+    image_pred_probs = None
+    clinical_pred_label = None
+    clinical_prob_death = None
+    labels_clf = ["benign", "malignant", "normal"]
+    vi_map = {"benign": "U lành tính", "malignant": "U ác tính", "normal": "Bình thường"}
 
-        with col_b:
-            sx = st.selectbox("Type of Breast Surgery", ["Breast Conserving", "Mastectomy"])
-            grade = st.selectbox("Neoplasm Histologic Grade", [1, 2, 3])
-            stage = st.selectbox("Tumor Stage", [1, 2, 3, 4])
-            sex = st.selectbox("Sex", ["Female", "Male"])
-            cell = st.selectbox("Cellularity", ["High", "Low", "Moderate"])
-            chemo = st.selectbox("Chemotherapy", ["No", "Yes"])
-            hormone = st.selectbox("Hormone Therapy", ["No", "Yes"])
+    # ---------------------------------------------
+    # 7.1 PHÂN TÍCH ẢNH SIÊU ÂM
+    # ---------------------------------------------
+    st.subheader("📷 Phân tích ảnh siêu âm")
 
-        with col_c:
-            radio = st.selectbox("Radio Therapy", ["No", "Yes"])
-            er = st.selectbox("ER Status", ["Negative", "Positive"])
-            pr = st.selectbox("PR Status", ["Negative", "Positive"])
-            her2 = st.selectbox("HER2 Status", ["Negative", "Positive"])
-            gene = st.selectbox(
-                "3-Gene classifier subtype",
-                [
-                    "ER+/HER2+",
-                    "ER+/HER2- High Prolif",
-                    "ER+/HER2- Low Prolif",
-                    "ER-/HER2+",
-                    "ER-/HER2-",
-                ],
-            )
-            pam50 = st.selectbox(
-                "Pam50 + Claudin-low subtype",
-                ["Basal-like", "Claudin-low", "HER2-enriched", "Luminal A", "Luminal B", "Normal-like"],
-            )
-            relapse = st.selectbox("Relapse Free Status", ["Not Recurred", "Recurred"])
+    upload = st.file_uploader("📤 Chọn ảnh siêu âm (định dạng PNG/JPG/JPEG)", ["png", "jpg", "jpeg"])
 
-        submit_clinical = st.form_submit_button("Predict Clinical Outcome")
-
-    if submit_clinical:
-        row = {
-            "Age at Diagnosis": age,
-            "Tumor Size": size,
-            "Lymph nodes examined positive": lymph,
-            "Mutation Count": mut,
-            "Nottingham prognostic index": npi,
-            "Overall Survival (Months)": os_m,
-            "Type of Breast Surgery": sx,
-            "Neoplasm Histologic Grade": grade,
-            "Tumor Stage": stage,
-            "Sex": sex,
-            "Cellularity": cell,
-            "Chemotherapy": chemo,
-            "Hormone Therapy": hormone,
-            "Radio Therapy": radio,
-            "ER Status": er,
-            "PR Status": pr,
-            "HER2 Status": her2,
-            "3-Gene classifier subtype": gene,
-            "Pam50 + Claudin-low subtype": pam50,
-            "Relapse Free Status": relapse,
-        }
-
-        X = pd.DataFrame([row], columns=feature_names)
-
-        y = int(clinical_model.predict(X)[0])
-        pred_label = inv_label[y]
-        clinical_pred_label = pred_label
-
-        # Lấy xác suất tử vong nếu có key "Deceased" trong label_map
-        if "Deceased" in label_map:
-            prob = float(clinical_model.predict_proba(X)[0][label_map["Deceased"]])
+    if upload:
+        arr = np.frombuffer(upload.read(), np.uint8)
+        gray = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+        if gray is None:
+            st.error("❌ Không đọc được ảnh. Vui lòng chọn file ảnh hợp lệ.")
         else:
-            # fallback: lấy max probability (không chuẩn bằng)
-            prob = float(np.max(clinical_model.predict_proba(X)[0]))
+            gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
 
-        clinical_prob_death = prob
+            # Chuẩn bị input cho 2 model
+            x_seg, g_seg = prep(gray, get_input_hwc(seg_model))
+            x_clf, g_clf = prep(gray, get_input_hwc(class_model))
 
-        if pred_label == "Deceased":
-            st.error(f"Predicted outcome: **{pred_label}**")
+            # Phân đoạn
+            seg_pred = seg_model.predict(x_seg, verbose=0)[0]
+            mask = np.argmax(seg_pred, -1).astype(np.uint8)
+            overlay_img = overlay(g_seg, mask)
+
+            # Phân loại
+            probs = class_model.predict(x_clf, verbose=0)[0]
+            idx = int(np.argmax(probs))
+
+            image_pred_label_en = labels_clf[idx]
+            image_pred_label_vi = vi_map[image_pred_label_en]
+            image_pred_probs = probs
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.image(g_clf, caption="Ảnh siêu âm (đã chuẩn hóa)", use_column_width=True)
+            with col2:
+                st.image(overlay_img, caption="Kết quả phân đoạn (Xanh: lành, Đỏ: ác)", use_column_width=True)
+
+            st.success(f"🔍 Mô hình hình ảnh dự đoán: **{image_pred_label_vi}** "
+                       f"({probs[idx]*100:.1f}%)")
+
+            df_img = pd.DataFrame({
+                "Nhóm": ["Lành tính", "Ác tính", "Bình thường"],
+                "Xác suất (%)": (probs * 100).round(2)
+            })
+
+            st.altair_chart(
+                alt.Chart(df_img)
+                .mark_bar()
+                .encode(
+                    x="Nhóm",
+                    y="Xác suất (%)",
+                    tooltip=["Nhóm", "Xác suất (%)"],
+                ),
+                use_container_width=True,
+            )
+    else:
+        st.info("👆 Hãy tải lên một ảnh siêu âm để mô hình tiến hành minh họa.")
+
+    # ---------------------------------------------
+    # 7.2 MÔ HÌNH LÂM SÀNG (RANDOMFOREST)
+    # ---------------------------------------------
+    st.subheader("📊 Thông tin lâm sàng (minh họa)")
+
+    if clinical_model is None or clinical_meta is None:
+        st.warning("Không có mô hình lâm sàng khả dụng, bỏ qua phần này.")
+    else:
+        feature_names = clinical_model.feature_names_in_
+        label_map = clinical_meta["label_map"]
+        inv_label = {v: k for k, v in label_map.items()}
+
+        with st.form("clinical_form"):
+            col_a, col_b, col_c = st.columns(3)
+
+            with col_a:
+                age = st.number_input("Tuổi tại chẩn đoán (Age at Diagnosis)", 0, 120, 50)
+                size = st.number_input("Kích thước khối u (Tumor Size, mm)", 0, 200, 20)
+                lymph = st.number_input("Số hạch dương tính (Lymph nodes examined positive)", 0, 50, 0)
+                mut = st.number_input("Số lượng đột biến (Mutation Count)", 0, 10000, 0)
+                npi = st.number_input("Chỉ số Nottingham (NPI)", 0.0, 10.0, 4.0)
+                os_m = st.number_input("Thời gian sống toàn bộ (Overall Survival, tháng)", 0.0, 300.0, 60.0)
+
+            with col_b:
+                sx = st.selectbox("Loại phẫu thuật vú (Type of Breast Surgery)",
+                                  ["Breast Conserving", "Mastectomy"])
+                grade = st.selectbox("Độ mô học (Neoplasm Histologic Grade)", [1, 2, 3])
+                stage = st.selectbox("Giai đoạn u (Tumor Stage)", [1, 2, 3, 4])
+                sex = st.selectbox("Giới tính (Sex)", ["Female", "Male"])
+                cell = st.selectbox("Cellularity", ["High", "Low", "Moderate"])
+                chemo = st.selectbox("Hóa trị (Chemotherapy)", ["No", "Yes"])
+                hormone = st.selectbox("Liệu pháp nội tiết (Hormone Therapy)", ["No", "Yes"])
+
+            with col_c:
+                radio = st.selectbox("Xạ trị (Radio Therapy)", ["No", "Yes"])
+                er = st.selectbox("ER Status", ["Negative", "Positive"])
+                pr = st.selectbox("PR Status", ["Negative", "Positive"])
+                her2 = st.selectbox("HER2 Status", ["Negative", "Positive"])
+                gene = st.selectbox(
+                    "3-Gene classifier subtype",
+                    [
+                        "ER+/HER2+",
+                        "ER+/HER2- High Prolif",
+                        "ER+/HER2- Low Prolif",
+                        "ER-/HER2+",
+                        "ER-/HER2-",
+                    ],
+                )
+                pam50 = st.selectbox(
+                    "Pam50 + Claudin-low subtype",
+                    ["Basal-like", "Claudin-low", "HER2-enriched",
+                     "Luminal A", "Luminal B", "Normal-like"],
+                )
+                relapse = st.selectbox("Trạng thái tái phát (Relapse Free Status)",
+                                       ["Not Recurred", "Recurred"])
+
+            submit_clinical = st.form_submit_button("🔮 Dự đoán từ mô hình lâm sàng")
+
+        if submit_clinical:
+            row = {
+                "Age at Diagnosis": age,
+                "Tumor Size": size,
+                "Lymph nodes examined positive": lymph,
+                "Mutation Count": mut,
+                "Nottingham prognostic index": npi,
+                "Overall Survival (Months)": os_m,
+                "Type of Breast Surgery": sx,
+                "Neoplasm Histologic Grade": grade,
+                "Tumor Stage": stage,
+                "Sex": sex,
+                "Cellularity": cell,
+                "Chemotherapy": chemo,
+                "Hormone Therapy": hormone,
+                "Radio Therapy": radio,
+                "ER Status": er,
+                "PR Status": pr,
+                "HER2 Status": her2,
+                "3-Gene classifier subtype": gene,
+                "Pam50 + Claudin-low subtype": pam50,
+                "Relapse Free Status": relapse,
+            }
+
+            X = pd.DataFrame([row], columns=feature_names)
+
+            y = int(clinical_model.predict(X)[0])
+            pred_label = inv_label[y]
+            clinical_pred_label = pred_label
+
+            if "Deceased" in label_map:
+                prob_death = float(
+                    clinical_model.predict_proba(X)[0][label_map["Deceased"]]
+                )
+            else:
+                prob_death = float(np.max(clinical_model.predict_proba(X)[0]))
+            clinical_prob_death = prob_death
+
+            if pred_label == "Deceased":
+                st.error(f"🧬 Mô hình lâm sàng dự đoán kết cục: **{pred_label}**")
+            else:
+                st.success(f"🧬 Mô hình lâm sàng dự đoán kết cục: **{pred_label}**")
+
+            st.write(f"📈 Xác suất tử vong ước tính: **{prob_death*100:.1f}%**")
+
+    # ---------------------------------------------
+    # 7.3 ĐÁNH GIÁ TỔNG HỢP (ẢNH + LÂM SÀNG)
+    # ---------------------------------------------
+    st.markdown("---")
+    st.subheader("🧠 Đánh giá tổng hợp từ hai mô hình")
+
+    if (image_pred_probs is None) and (clinical_prob_death is None):
+        st.info("Khi có cả **kết quả mô hình hình ảnh** và **kết quả mô hình lâm sàng**, "
+                "hệ thống sẽ hiển thị đánh giá tổng hợp tại đây.")
+    else:
+        # Diễn giải riêng từng mô hình
+        if image_pred_probs is not None:
+            p_malignant = float(image_pred_probs[labels_clf.index("malignant")])
+            st.write("🔬 **Nhận định từ mô hình hình ảnh:**")
+            st.write(
+                f"- Kết luận: **{image_pred_label_vi}** "
+                f"(xác suất ác tính ≈ {p_malignant*100:.1f}%)."
+            )
         else:
-            st.success(f"Predicted outcome: **{pred_label}**")
+            p_malignant = None
 
-        st.write(f"Estimated probability of death: **{prob * 100:.1f}%**")
+        if clinical_prob_death is not None:
+            st.write("📋 **Nhận định từ mô hình lâm sàng:**")
+            st.write(
+                f"- Kết cục dự đoán: **{clinical_pred_label}** "
+                f"(xác suất tử vong ≈ {clinical_prob_death*100:.1f}%)."
+            )
+        else:
+            clinical_prob_death = None
 
+        # Nếu có đủ cả hai → tính chỉ số nguy cơ kết hợp (heuristic)
+        if (p_malignant is not None) and (clinical_prob_death is not None):
+            # Chỉ số nguy cơ kết hợp: 60% từ hình ảnh, 40% từ lâm sàng (minh họa)
+            combined_risk = 0.6 * p_malignant + 0.4 * clinical_prob_death
+
+            if combined_risk < 0.3:
+                risk_group = "Nguy cơ thấp"
+            elif combined_risk < 0.6:
+                risk_group = "Nguy cơ trung bình"
+            else:
+                risk_group = "Nguy cơ cao"
+
+            st.write("📎 **Chỉ số nguy cơ kết hợp (minh họa):**")
+            st.write(
+                f"- Điểm nguy cơ ≈ **{combined_risk*100:.1f}%** → Nhóm: **{risk_group}**."
+            )
+
+            if risk_group == "Nguy cơ cao":
+                st.error(
+                    "📌 Đánh giá tổng hợp: mô hình gợi ý **nguy cơ cao**. "
+                    "Cần được bác sĩ chuyên khoa thăm khám và đánh giá trực tiếp."
+                )
+            elif risk_group == "Nguy cơ trung bình":
+                st.warning(
+                    "📌 Đánh giá tổng hợp: mô hình gợi ý **nguy cơ trung bình**. "
+                    "Cần theo dõi sát, kết hợp thêm xét nghiệm và chẩn đoán hình ảnh khác."
+                )
+            else:
+                st.success(
+                    "📌 Đánh giá tổng hợp: mô hình gợi ý **nguy cơ thấp**. "
+                    "Tuy nhiên, bệnh nhân vẫn cần tầm soát và khám định kỳ theo khuyến cáo."
+                )
+
+            st.caption(
+                "⚠️ Lưu ý: Chỉ số nguy cơ kết hợp trên chỉ là **heuristic minh họa**, "
+                "chưa được hiệu chỉnh trên dữ liệu lâm sàng thật. "
+                "Không dùng để tự chẩn đoán hoặc thay thế ý kiến bác sĩ."
+            )
+        else:
+            st.info("Cần có đủ cả **kết quả hình ảnh** và **kết quả lâm sàng** "
+                    "để tính toán chỉ số nguy cơ kết hợp.")
 
 # =====================================================
-# 5.3 KẾT HỢP 2 KẾT QUẢ (IMAGE + CLINICAL)
+# 8) CHÂN TRANG (FOOTER)
 # =====================================================
-st.markdown("---")
-st.header("🧠 Combined AI Assessment")
+st.markdown("""
+---
+📘 **Tuyên bố miễn trừ trách nhiệm:**  
+Ứng dụng này được phát triển phục vụ mục đích **nghiên cứu khoa học và giáo dục**.  
+Không sử dụng cho **chẩn đoán, điều trị hoặc tư vấn y tế**.  
 
-if image_pred_label_en is None and (clinical_pred_label is None or clinical_prob_death is None):
-    st.info("Khi bạn đã có **kết quả hình ảnh** và **kết quả lâm sàng**, hệ thống sẽ đưa ra nhận định tổng hợp tại đây.")
-else:
-    # Mô tả từ phía hình ảnh
-    img_text = None
-    if image_pred_label_en is not None:
-        img_text = f"Hình ảnh siêu âm được mô hình phân loại là: **{image_pred_label_vi}**."
-
-    # Mô tả từ phía lâm sàng
-    clin_text = None
-    if clinical_pred_label is not None and clinical_prob_death is not None:
-        clin_text = (
-            f"Mô hình lâm sàng dự đoán kết cục: **{clinical_pred_label}** "
-            f"với xác suất tử vong ước tính khoảng **{clinical_prob_death * 100:.1f}%**."
-        )
-
-    # Hiển thị riêng lẻ
-    if img_text:
-        st.write("🔬 **Nhận định từ hình ảnh:**")
-        st.write(img_text)
-
-    if clin_text:
-        st.write("📋 **Nhận định từ dữ liệu lâm sàng:**")
-        st.write(clin_text)
-
-    # Tổng hợp định tính
-    if image_pred_label_en is not None and clinical_pred_label is not None and clinical_prob_death is not None:
-        if image_pred_label_en == "malignant" and clinical_prob_death >= 0.5:
-            st.error(
-                "📌 **Đánh giá tổng hợp:**\n\n"
-                "- Hình ảnh gợi ý **tổn thương ác tính**.\n"
-                "- Mô hình lâm sàng cho thấy **nguy cơ tử vong cao**.\n\n"
-                "👉 Cần được bác sĩ chuyên khoa đánh giá khẩn và xem xét phác đồ điều trị phù hợp."
-            )
-        elif image_pred_label_en == "malignant" and clinical_prob_death < 0.5:
-            st.warning(
-                "📌 **Đánh giá tổng hợp:**\n\n"
-                "- Hình ảnh gợi ý **tổn thương ác tính**.\n"
-                "- Nguy cơ tử vong dự đoán **không quá cao**, nhưng vẫn cần theo dõi và điều trị sát.\n\n"
-                "👉 Đề nghị trao đổi kết quả với bác sĩ chuyên khoa để có chỉ định tiếp theo."
-            )
-        elif image_pred_label_en in ["benign", "normal"] and clinical_prob_death < 0.5 and clinical_pred_label != "Deceased":
-            st.success(
-                "📌 **Đánh giá tổng hợp:**\n\n"
-                "- Hình ảnh **không gợi ý tổn thương ác tính rõ ràng**.\n"
-                "- Mô hình lâm sàng dự đoán **kết cục sống** với nguy cơ tử vong thấp.\n\n"
-                "👉 Dù dấu hiệu hiện tại tương đối thuận lợi, bệnh nhân vẫn cần tái khám định kỳ theo chỉ định."
-            )
-        else:
-            st.info(
-                "📌 **Đánh giá tổng hợp:**\n\n"
-                "- Kết quả mô hình hình ảnh và lâm sàng **chưa hoàn toàn đồng nhất** hoặc ở mức nguy cơ trung gian.\n"
-                "- Cần **kết hợp thêm thông tin lâm sàng, xét nghiệm, sinh thiết** và đánh giá trực tiếp bởi bác sĩ.\n\n"
-                "👉 Mô hình chỉ mang tính hỗ trợ, không thay thế quyết định chẩn đoán/điều trị."
-            )
-
-st.markdown(
-    "> ⚠️ *Lưu ý: Tất cả kết quả trên chỉ có tính chất tham khảo, không dùng để tự chẩn đoán hay tự điều trị. "
-    "Quyết định cuối cùng phải do bác sĩ lâm sàng đánh giá.*"
-)
+© 2025 – Dự án AI Siêu âm Vú.  
+Tác giả minh họa: Lê Vũ Anh Tin – Trường THPT Chuyên Nguyễn Du.
+""")
