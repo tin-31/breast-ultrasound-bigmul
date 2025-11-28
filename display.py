@@ -78,11 +78,15 @@ CUSTOM_OBJECTS = {
 MODEL_DIR = "models"
 
 drive_files = {
-    "Classifier_model_2.h5": "1fXPICuTkETep2oPiA56l0uMai2GusEJH",
+    # Mô hình phân loại mới
+    "breast_ultrasound_classifier_ft.keras": "1IdGtQ1Sh1J1NC6acJ9mIkQdlq_xEeCJV",
+    # Mô hình phân đoạn
     "best_model_cbam_attention_unet_fixed.keras": "1axOg7N5ssJrMec97eV-JMPzID26ynzN1",
+    # Mô hình lâm sàng
     "clinical_rf_model.joblib": "1zHBB05rVUK7H9eZ9y5N9stUZnhzYBafc",
     "clinical_rf_metadata.json": "1KHZWZXs8QV8jLNXBkAVsQa_DN3tHuXtx",
 }
+
 
 def download_models():
     os.makedirs(MODEL_DIR, exist_ok=True)
@@ -103,11 +107,11 @@ def load_all_models():
         safe_mode=False,
     )
 
+    # Load classifier mới
     clf = load_model(
-        os.path.join(MODEL_DIR, "Classifier_model_2.h5"),
+        os.path.join(MODEL_DIR, "breast_ultrasound_classifier_ft.keras"),
         compile=False,
     )
-
     clinical = None
     meta = None
     try:
@@ -184,6 +188,16 @@ def overlay_segmentation(gray, mask, alpha=0.6):
         return out_uint8
 
     return out.clip(0, 255).astype(np.uint8)
+from tensorflow.keras.layers import Conv2D
+
+def find_last_conv_layer(model):
+    """
+    Tự động tìm lớp Conv2D cuối cùng trong model để dùng cho Grad-CAM.
+    """
+    for layer in reversed(model.layers):
+        if isinstance(layer, Conv2D):
+            return layer.name
+    raise ValueError("Không tìm thấy lớp Conv2D nào trong mô hình để làm Grad-CAM.")
 
 # ------------------------------------------------------------
 # GRAD-CAM
@@ -420,9 +434,13 @@ elif chon_trang == "Ứng dụng":
             gradcam_img = None
             gradcam_with_mask = None
             try:
-                last_conv_name = "top_conv"  # EfficientNetV2B3
+                # Tự động tìm lớp Conv2D cuối cùng trong classifier mới
+                last_conv_name = find_last_conv_layer(class_model)
+                # Nếu muốn xem tên layer để debug, có thể:
+                # st.caption(f"Last conv layer: {last_conv_name}")
+            
                 class_idx_for_cam = labels_clf.index("malignant")  # hoặc idx
-
+            
                 heatmap_raw = make_gradcam_heatmap(
                     img_array=x_clf,
                     model=class_model,
