@@ -298,37 +298,52 @@ else:
     vi_map = {"benign":"U lành","malignant":"U ác","normal":"Bình thường"}
 
     uploaded = st.file_uploader(
-        "Tải ảnh siêu âm (PNG/JPG/NIFTI/DICOM)",
-        ["png","jpg","jpeg","nii","nii.gz","dcm"]
-    )
+    "Tải ảnh siêu âm (PNG/JPG/NIFTI/DICOM)",
+    ["png", "jpg", "jpeg", "nii", "nii.gz", "dcm"]
+)
 
-    image_pred_probs = None
-    clinical_prob_death = None
-    clinical_pred_label = None
+image_pred_probs = None
+clinical_prob_death = None
+clinical_pred_label = None
 
-    if uploaded:
-        # Đọc ảnh
-        suffix = Path(uploaded.name).suffix.lower()
-        if suffix in ["png","jpg","jpeg"]:
-            arr = np.frombuffer(uploaded.read(), np.uint8)
-            gray = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
-        else:
-            gray,_ = load_3d_slice(uploaded)
+if uploaded:
+    suffix = Path(uploaded.name).suffix.lower()
+    gray = None
 
-        gray = cv2.normalize(gray, None, 0,255, cv2.NORM_MINMAX)
+    # 1) ẢNH 2D: PNG/JPG
+    if suffix in [".png", ".jpg", ".jpeg"]:
+        arr = np.frombuffer(uploaded.read(), np.uint8)
+        gray = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
 
-        # SEGMENTATION
-        x_seg, g_seg = prep_seg(gray, get_input_hwc(seg_model))
-        seg_pred = seg_model.predict(x_seg)[0]
-        mask = np.argmax(seg_pred,-1).astype(np.uint8)
-        overlay_img = overlay_segmentation(g_seg, mask)
+    # 2) ẢNH 3D: NIfTI / DICOM
+    elif suffix in [".nii", ".nii.gz", ".gz", ".dcm"]:
+        gray, _ = load_3d_slice(uploaded)
 
-        # CLASSIFICATION
-        x_clf, g_clf = prep_classifier(gray, class_model)
-        probs = class_model.predict(x_clf)[0]
-        idx = int(np.argmax(probs))
-        image_pred_probs = probs
-        pred_label_vi = vi_map[labels_clf[idx]]
+    # 3) Định dạng không hỗ trợ
+    else:
+        st.error("❌ Định dạng ảnh không được hỗ trợ.")
+        st.stop()
+
+    # Nếu vì lý do nào đó vẫn không đọc được ảnh → dừng luôn
+    if gray is None:
+        st.error("❌ Không đọc được ảnh từ file. Vui lòng thử lại ảnh khác.")
+        st.stop()
+
+    # Chuẩn hóa về 0–255
+    gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+
+    # ---- từ đây trở xuống giữ nguyên như bạn đang có ----
+    x_seg, g_seg = prep_seg(gray, get_input_hwc(seg_model))
+    seg_pred = seg_model.predict(x_seg, verbose=0)[0]
+    mask = np.argmax(seg_pred, -1).astype(np.uint8)
+    overlay_img = overlay_segmentation(g_seg, mask)
+
+    x_clf, g_clf = prep_classifier(gray, class_model)
+    probs = class_model.predict(x_clf, verbose=0)[0]
+    idx = int(np.argmax(probs))
+    image_pred_probs = probs
+    pred_label_vi = vi_map[labels_clf[idx]]
+    # … rồi đến phần Grad-CAM như bạn đã có
 
         # GRAD-CAM
         try:
