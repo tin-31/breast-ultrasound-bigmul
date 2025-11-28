@@ -200,6 +200,7 @@ def make_gradcam_heatmap(img_array,
     class_index: chỉ số lớp cần Grad-CAM (0/1/2).
                  Nếu None → dùng lớp có xác suất cao nhất.
     """
+    # Lấy lớp conv cuối và tạo model trung gian
     last_conv_layer = model.get_layer(last_conv_layer_name)
     grad_model = keras.Model(
         [model.inputs],
@@ -208,21 +209,35 @@ def make_gradcam_heatmap(img_array,
 
     with tf.GradientTape() as tape:
         conv_outputs, predictions = grad_model(img_array)
+
+        # Nếu conv_outputs hoặc predictions là list → lấy phần tử đầu tiên
+        if isinstance(conv_outputs, (list, tuple)):
+            conv_outputs = conv_outputs[0]
+        if isinstance(predictions, (list, tuple)):
+            predictions = predictions[0]
+
+        # predictions bây giờ là tensor (1, num_classes)
         if class_index is None:
             class_index = tf.argmax(predictions[0])
+
+        # scalar score của lớp cần Grad-CAM
         class_channel = predictions[:, class_index]
 
+    # gradient của score lớp đó theo feature map
     grads = tape.gradient(class_channel, conv_outputs)
+
+    # Global average pooling theo (H, W)
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
 
-    conv_outputs = conv_outputs[0]  # (H, W, C)
+    # Feature map (H, W, C)
+    conv_outputs = conv_outputs[0]
     heatmap = tf.reduce_mean(conv_outputs * pooled_grads, axis=-1)  # (H, W)
 
+    # ReLU + chuẩn hóa 0–1
     heatmap = tf.nn.relu(heatmap)
     heatmap = heatmap / (tf.reduce_max(heatmap) + 1e-8)
 
     return heatmap.numpy()
-
 def apply_gradcam_on_gray(gray, heatmap, alpha=0.4):
     """
     gray: ảnh xám đã resize đúng kích thước model (chính là g_clf).
