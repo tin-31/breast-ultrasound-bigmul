@@ -200,7 +200,6 @@ def make_gradcam_heatmap(img_array,
     class_index: chỉ số lớp cần Grad-CAM (0/1/2).
                  Nếu None → dùng lớp có xác suất cao nhất.
     """
-    # Lấy lớp conv cuối và tạo model trung gian
     last_conv_layer = model.get_layer(last_conv_layer_name)
     grad_model = keras.Model(
         [model.inputs],
@@ -210,44 +209,62 @@ def make_gradcam_heatmap(img_array,
     with tf.GradientTape() as tape:
         conv_outputs, predictions = grad_model(img_array)
 
-        # Nếu conv_outputs hoặc predictions là list → lấy phần tử đầu tiên
+        # Nếu là list/tuple thì lấy phần tử đầu
         if isinstance(conv_outputs, (list, tuple)):
             conv_outputs = conv_outputs[0]
         if isinstance(predictions, (list, tuple)):
             predictions = predictions[0]
 
-        # predictions bây giờ là tensor (1, num_classes)
         if class_index is None:
             class_index = tf.argmax(predictions[0])
 
-        # scalar score của lớp cần Grad-CAM
         class_channel = predictions[:, class_index]
 
-    # gradient của score lớp đó theo feature map
     grads = tape.gradient(class_channel, conv_outputs)
-
-    # Global average pooling theo (H, W)
     pooled_grads = tf.reduce_mean(grads, axis=(0, 1, 2))
 
-    # Feature map (H, W, C)
-    conv_outputs = conv_outputs[0]
+    conv_outputs = conv_outputs[0]  # (H, W, C)
     heatmap = tf.reduce_mean(conv_outputs * pooled_grads, axis=-1)  # (H, W)
 
-    # ReLU + chuẩn hóa 0–1
     heatmap = tf.nn.relu(heatmap)
     heatmap = heatmap / (tf.reduce_max(heatmap) + 1e-8)
 
     return heatmap.numpy()
-def apply_gradcam_on_gray(gray, heatmap, alpha=0.4):
+
+def mask_heatmap_with_segmentation(heatmap, mask_resized):
     """
-    gray: ảnh xám đã resize đúng kích thước model (chính là g_clf).
-    heatmap: (Hc, Wc) 0–1.
-    alpha: độ đậm của Grad-CAM overlay.
+    Chỉ giữ Grad-CAM trên vùng có khối u (mask == 1 hoặc 2).
+    """
+    lesion = (mask_resized == 1) | (mask_resized == 2)
+    masked = np.zeros_like(heatmap, dtype=np.float32)
+    masked[lesion] = heatmap[lesion]
+    if masked.max() > 0:
+        masked = masked / masked.max()
+    return masked
+
+def apply_gradcam_on_gray(gray, heatmap, alpha=0.6, gamma=0.7, thresh=0.25):
+    """
+    gray: ảnh xám đã resize (g_clf)
+    heatmap: (H, W) 0–1 (đã mask theo vùng u)
+    alpha: độ đậm overlay
+    gamma: <1 → tăng tương phản vùng nóng
+    thresh: dưới ngưỡng coi như 0 để nền ít bị nhuộm màu
     """
     h, w = gray.shape[:2]
     heatmap_resized = cv2.resize(heatmap, (w, h))
 
-    heatmap_uint8 = np.uint8(255 * heatmap_resized)
+    heatmap_resized = np.clip(heatmap_resized, 0.0, 1.0).astype(np.float32)
+
+    # Tăng tương phản
+    heatmap_gamma = np.power(heatmap_resized, gamma)
+
+    # Cắt ngưỡng
+    heatmap_gamma[heatmap_gamma < thresh] = 0.0
+
+    # Làm mượt nhẹ
+    heatmap_blur = cv2.GaussianBlur(heatmap_gamma, (5, 5), 0)
+
+    heatmap_uint8 = np.uint8(255 * heatmap_blur)
     heatmap_color = cv2.applyColorMap(heatmap_uint8, cv2.COLORMAP_JET)
 
     base = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR)
@@ -484,41 +501,50 @@ elif chon_trang == "Ứng dụng":
             image_pred_probs = probs
 
             # ============================
-            # 🔥 TÍNH GRAD-CAM
+            # 🔥 TÍNH GRAD-CAM ĐẸP HƠN
             # ============================
             gradcam_img = None
             gradcam_with_mask = None
             try:
-                # 1) Tìm lớp Conv2D cuối cùng trong classifier
+                # 1) Tên lớp Conv2D cuối
                 last_conv_name = get_last_conv_layer_name(class_model)
 
-                # 2) Chọn lớp cần Grad-CAM
-                #    - Luôn nhìn lớp 'malignant' (phù hợp mục tiêu luận văn)
+                # 2) Chọn lớp cần Grad-CAM (ác tính)
                 class_idx_for_cam = labels_clf.index("malignant")
-                #    - Hoặc dùng lớp dự đoán cao nhất:
-                # class_idx_for_cam = idx
+                # hoặc: class_idx_for_cam = idx
 
-                # 3) Tính heatmap
-                heatmap = make_gradcam_heatmap(
+                # 3) Tính heatmap gốc
+                heatmap_raw = make_gradcam_heatmap(
                     img_array=x_clf,
                     model=class_model,
                     last_conv_layer_name=last_conv_name,
                     class_index=class_idx_for_cam,
                 )
 
-                # 4) Overlay lên ảnh xám (g_clf chính là ảnh resize cho classifier)
-                gradcam_img = apply_gradcam_on_gray(g_clf, heatmap, alpha=0.4)
-
-                # 5) Overlay thêm contour segmentation (tuỳ chọn)
+                # 4) Resize mask về kích thước classifier
                 mask_resized = cv2.resize(
                     mask,
                     (g_clf.shape[1], g_clf.shape[0]),
                     interpolation=cv2.INTER_NEAREST,
                 )
+
+                # 5) chỉ giữ Grad-CAM trong vùng u
+                heatmap_masked = mask_heatmap_with_segmentation(heatmap_raw, mask_resized)
+
+                # 6) Overlay Grad-CAM (vùng nóng trong u)
+                gradcam_img = apply_gradcam_on_gray(
+                    g_clf,
+                    heatmap_masked,
+                    alpha=0.6,
+                    gamma=0.7,
+                    thresh=0.25,
+                )
+
+                # 7) Thêm contour khối u cho dễ nhìn
                 gradcam_with_mask = overlay_mask_contour_on_color(
                     gradcam_img,
                     mask_resized,
-                    contour_color=(0, 255, 255),  # vàng
+                    contour_color=(0, 255, 255),
                     thickness=2,
                 )
 
