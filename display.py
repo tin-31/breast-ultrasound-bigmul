@@ -234,13 +234,34 @@ def make_gradcam_heatmap(img_array,
 def mask_heatmap_with_segmentation(heatmap, mask_resized):
     """
     Chỉ giữ Grad-CAM trên vùng có khối u (mask == 1 hoặc 2).
+
+    heatmap: (Hc, Wc) – kích thước feature map (nhỏ)
+    mask_resized: (H, W) – cùng kích thước với ảnh classifier (g_clf)
+    => Hàm sẽ resize heatmap về (H, W) rồi mới mask.
     """
+    # Đảm bảo heatmap là 2D
+    heatmap = np.squeeze(heatmap)
+    if heatmap.ndim == 3:
+        # nếu lỡ là (H, W, 1) thì lấy kênh đầu
+        heatmap = heatmap[..., 0]
+
+    H, W = mask_resized.shape[:2]
+
+    # Resize heatmap về đúng kích thước mask
+    heatmap_resized = cv2.resize(heatmap, (W, H))
+    heatmap_resized = heatmap_resized.astype(np.float32)
+
+    # Tạo mask vùng tổn thương
     lesion = (mask_resized == 1) | (mask_resized == 2)
-    masked = np.zeros_like(heatmap, dtype=np.float32)
-    masked[lesion] = heatmap[lesion]
+
+    masked = np.zeros_like(heatmap_resized, dtype=np.float32)
+    masked[lesion] = heatmap_resized[lesion]
+
     if masked.max() > 0:
-        masked = masked / masked.max()
+        masked /= masked.max()
+
     return masked
+
 
 def apply_gradcam_on_gray(gray, heatmap, alpha=0.6, gamma=0.7, thresh=0.25):
     """
