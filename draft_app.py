@@ -6,6 +6,8 @@
 
 import os
 import json
+import tempfile
+from pathlib import Path
 
 import gdown
 import numpy as np
@@ -20,6 +22,9 @@ from keras.models import load_model
 from keras.saving import register_keras_serializable
 
 import joblib
+import nibabel as nib
+import pydicom
+from pydicom.pixel_data_handlers.util import apply_voi_lut
 
 # =====================================================
 # ⚙️ CẤU HÌNH CHUNG
@@ -72,13 +77,17 @@ CUSTOM_OBJECTS = {
 MODEL_DIR = "models"
 
 drive_files = {
-    # Mô hình phân loại + phân đoạn ảnh siêu âm
-    "Classifier_model_2.h5": "1fXPICuTkETep2oPiA56l0uMai2GusEJH",
-    "best_model_cbam_attention_unet_fixed.keras": "1axOg7N5ssJrMec97eV-JMPzID26ynzN1",
+    # Mô hình phân đoạn + phân loại ảnh siêu âm (mới)
+    "best_model_cbam_attention_unet.h5": "1YdAQeiwQtpY5rEvyNeUGlbcK9U51D8yP",
+    "breast_ultrasound_classifier_ft.keras": "1t10DVeMT1s7fNEToMV3PLI_5-HFbBm_b",
 
-    # Mô hình lâm sàng RandomForest + metadata
-    "clinical_rf_model.joblib": "1zHBB05rVUK7H9eZ9y5N9stUZnhzYBafc",
-    "clinical_rf_metadata.json": "1KHZWZXs8QV8jLNXBkAVsQa_DN3tHuXtx",
+    # Mô hình lâm sàng METABRIC
+    "model_cox.joblib": "1XtaTE_AjMAnNv5pO_u5Z3xC1PE_oYETq",
+    "model_logistic.joblib": "1zdcXp1IvGXQT87XBTLUvyV0wmQFVFI4d",
+    "model_xgb_recur.joblib": "1n_ntNn9qORqA0nZBbMNFOjOZVW9kaJfT",
+    "model_rf_stage.joblib": "15A-fB9z2eUmKcg_UDqq8Zd1ttpTfMUY4",
+    "model_xgb_stage.joblib": "19iu9b94IaLnXZyBiEidk0FNR4lthMChO",
+    "preprocess.joblib": "1KU9NkpwCDvbTrOBONGQHjt2TzouCPfAv",
 }
 
 def download_models():
@@ -96,29 +105,41 @@ def download_models():
 # ============================
 @st.cache_resource
 def load_all_models():
-    """Load mô hình phân đoạn, phân loại và mô hình lâm sàng."""
+    """
+    Load mô hình phân đoạn, phân loại và các mô hình lâm sàng METABRIC.
+    clinical_models: dict gồm {cox, logistic, xgb_recur, rf_stage, xgb_stage}
+    preprocess: thông tin tiền xử lý (features, encoders,...)
+    """
+    # Ảnh: dùng các mô hình mới
     seg_model = load_model(
-        os.path.join(MODEL_DIR, "best_model_cbam_attention_unet_fixed.keras"),
+        os.path.join(MODEL_DIR, "best_model_cbam_attention_unet.h5"),
         compile=False,
         custom_objects=CUSTOM_OBJECTS,
         safe_mode=False
     )
 
     class_model = load_model(
-        os.path.join(MODEL_DIR, "Classifier_model_2.h5"),
+        os.path.join(MODEL_DIR, "breast_ultrasound_classifier_ft.keras"),
         compile=False
     )
 
-    clinical_model = None
-    clinical_meta = None
-    try:
-        clinical_model = joblib.load(os.path.join(MODEL_DIR, "clinical_rf_model.joblib"))
-        with open(os.path.join(MODEL_DIR, "clinical_rf_metadata.json"), "r") as f:
-            clinical_meta = json.load(f)
-    except Exception as e:
-        st.error(f"❌ Không thể load mô hình lâm sàng: {e}")
+    # Lâm sàng
+    clinical_models = {}
+    preprocess = None
 
-    return seg_model, class_model, clinical_model, clinical_meta
+    try:
+        preprocess = joblib.load(os.path.join(MODEL_DIR, "preprocess.joblib"))
+
+        clinical_models["cox"] = joblib.load(os.path.join(MODEL_DIR, "model_cox.joblib"))
+        clinical_models["logistic"] = joblib.load(os.path.join(MODEL_DIR, "model_logistic.joblib"))
+        clinical_models["xgb_recur"] = joblib.load(os.path.join(MODEL_DIR, "model_xgb_recur.joblib"))
+        clinical_models["rf_stage"] = joblib.load(os.path.join(MODEL_DIR, "model_rf_stage.joblib"))
+        clinical_models["xgb_stage"] = joblib.load(os.path.join(MODEL_DIR, "model_xgb_stage.joblib"))
+
+    except Exception as e:
+        st.error(f"❌ Không thể load đầy đủ mô hình lâm sàng METABRIC: {e}")
+
+    return seg_model, class_model, clinical_models, preprocess
 
 # ============================
 # 3) HÀM XỬ LÝ ẢNH
@@ -169,6 +190,46 @@ def overlay(gray, mask, alpha=0.6):
 
     return out.clip(0, 255).astype(np.uint8)
 
+# --- Hàm hỗ trợ đọc NIfTI ---
+def load_nifti_slice(file, slice_strategy="middle"):
+    img = nib.load(file)
+    vol = img.get_fdata()
+    mid = vol.shape[2] // 2
+    if slice_strategy == "middle":
+        slice_img = vol[:, :, mid]
+    elif slice_strategy == "max_std":
+        idx = np.argmax([np.std(vol[:, :, i]) for i in range(vol.shape[2])])
+        slice_img = vol[:, :, idx]
+    else:
+        slice_img = vol[:, :, mid]
+    return slice_img.astype(np.uint8)
+
+# --- Hàm hỗ trợ đọc DICOM ---
+def load_dicom_slice(file):
+    ds = pydicom.dcmread(file)
+    arr = apply_voi_lut(ds.pixel_array, ds)
+    arr = arr.astype(np.float32)
+    arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-8) * 255
+    return arr.astype(np.uint8)
+
+# --- Tự động đọc ảnh 3D từ .nii/.gz hoặc DICOM .dcm ---
+def load_3d_slice(upload):
+    suffix = Path(upload.name).suffix.lower()
+    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
+        tmp.write(upload.read())
+        tmp_path = tmp.name
+    try:
+        if suffix in [".nii", ".gz"]:
+            return load_nifti_slice(tmp_path), "3D"
+        elif suffix == ".dcm":
+            return load_dicom_slice(tmp_path), "DICOM"
+        else:
+            st.error("❌ Định dạng ảnh 3D chưa được hỗ trợ.")
+            return None, None
+    except Exception as e:
+        st.error(f"❌ Không thể đọc ảnh: {e}")
+        return None, None
+
 # =====================================================
 # 4) SIDEBAR & CHỌN TRANG
 # =====================================================
@@ -187,7 +248,7 @@ if chon_trang == "Giới thiệu":
     st.markdown("""
 ### 🎯 Mục tiêu
 
-Ứng dụng này được xây dựng với mục đích **nghiên cứu học thuật** trong lĩnh vực:
+Ứng dụng này được xây dựng với mục đích **nghiên cứu học thuật** trong các lĩnh vực:
 
 - Trí tuệ nhân tạo (AI)  
 - Học sâu (Deep Learning)  
@@ -196,7 +257,7 @@ if chon_trang == "Giới thiệu":
 Cụ thể, ứng dụng minh họa cách:
 - Phân đoạn khối u trên **ảnh siêu âm tuyến vú** bằng mạng U-Net có cơ chế chú ý (CBAM).
 - Phân loại khối u thành **lành tính / ác tính / bình thường**.
-- Kết hợp thêm mô hình **dữ liệu lâm sàng** (RandomForest) để **hỗ trợ đánh giá nguy cơ**.
+- Kết hợp thêm mô hình **dữ liệu lâm sàng** (METABRIC) để **hỗ trợ đánh giá nguy cơ tái phát và sống còn**.
 - Đưa ra **nhận định tổng hợp** từ cả hai mô hình (hình ảnh + lâm sàng).
 
 ---
@@ -209,18 +270,6 @@ Cụ thể, ứng dụng minh họa cách:
   - Tự chẩn đoán bệnh.
   - Tự ý điều trị.
   - Thay thế ý kiến hay chỉ định của bác sĩ chuyên khoa.
-
----
-
-### 🧪 Đối tượng sử dụng
-
-- Học sinh, sinh viên, nhà nghiên cứu quan tâm đến AI trong y tế.  
-- Người muốn tìm hiểu quy trình: **tiền xử lý ảnh → mô hình AI → diễn giải kết quả**.  
-
----
-
-📌 **Tóm lại:**  
-Ứng dụng này là một **mô hình nghiên cứu** (proof-of-concept) về AI trong chẩn đoán hình ảnh, không phải sản phẩm y tế lâm sàng.
 """)
 
 # =====================================================
@@ -237,28 +286,7 @@ elif chon_trang == "Nguồn dữ liệu & Bản quyền":
 | **BUSI – Breast Ultrasound Images Dataset** (Arya Shah, Kaggle) | Ảnh siêu âm tuyến vú | [Mở liên kết](https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset) |
 | **BUS-UCLM Breast Ultrasound Dataset** (Orvile, Kaggle) | Ảnh siêu âm tuyến vú | [Mở liên kết](https://www.kaggle.com/datasets/orvile/bus-uclm-breast-ultrasound-dataset) |
 | **Breast Lesions USG (TCIA)** | Ảnh siêu âm tổn thương vú | [Mở liên kết](https://www.cancerimagingarchive.net/collection/breast-lesions-usg/) |
-| **Breast Cancer Clinical Data** (Mendeley Data) | Dữ liệu lâm sàng ung thư vú | [Mở liên kết](https://data.mendeley.com/datasets/dbz42w9x8h/2) |
-
----
-
-### 📄 Giấy phép & phạm vi sử dụng
-
-- Dữ liệu được sử dụng trong ứng dụng này **chỉ nhằm mục đích nghiên cứu khoa học và giáo dục**.
-- Không sử dụng cho:
-  - Mục đích thương mại.
-  - Các hệ thống chẩn đoán y tế triển khai thực tế.
-- Khi trích dẫn hoặc sử dụng lại dữ liệu, cần tuân thủ:
-  - Điều khoản giấy phép ghi rõ trên từng trang dataset.
-  - Trích dẫn tác giả/bộ sưu tập dữ liệu gốc.
-
----
-
-### 📚 Gợi ý trích dẫn (APA, tham khảo)
-
-- Shah, A. (2020). *Breast Ultrasound Images Dataset* [Dataset]. Kaggle.  
-- Orvile. (2023). *BUS-UCLM Breast Ultrasound Dataset* [Dataset]. Kaggle.  
-- The Cancer Imaging Archive. (2021). *Breast Lesions USG* [Dataset].  
-- Mendeley Data (n.d.). *Breast Cancer Clinical Data* [Dataset]. Mendeley.  
+| **Breast Cancer Clinical Data / METABRIC** | Dữ liệu lâm sàng ung thư vú | Các kho dữ liệu công khai (TCGA, METABRIC, Mendeley, v.v.) |
 
 ---
 
@@ -272,243 +300,213 @@ elif chon_trang == "Nguồn dữ liệu & Bản quyền":
 # =====================================================
 elif chon_trang == "Ứng dụng":
     st.title("🩺 ỨNG DỤNG AI MINH HỌA PHÂN TÍCH SIÊU ÂM VÚ")
-    st.markdown("""
-Ứng dụng cho phép:
-1. 📷 Tải lên **ảnh siêu âm tuyến vú** để mô hình:
-   - Phân đoạn vùng nghi ngờ.
-   - Phân loại: **Lành tính / Ác tính / Bình thường**.
-2. 📊 Nhập **thông tin lâm sàng cơ bản** để mô hình RandomForest dự đoán **kết cục sống còn**.
-3. 🧠 Xem **đánh giá tổng hợp** được kết hợp từ cả hai mô hình.
 
-> ⚠️ Kết quả chỉ mang tính **minh họa học thuật**, không sử dụng cho chẩn đoán y khoa thực tế.
+    st.markdown("""
+### 📌 Hướng dẫn sử dụng nhanh
+
+**Bước 1. Chuẩn bị dữ liệu hình ảnh**
+
+- Ảnh siêu âm vú 2D dạng: `PNG`, `JPG`, `JPEG`; **hoặc**
+- Ảnh/khối 3D dạng `NIfTI (.nii/.nii.gz)`; **hoặc**
+- File DICOM: `*.dcm`.
+
+**Bước 2. Tải ảnh lên**
+
+- Cuộn xuống phần **“📷 Phân tích ảnh siêu âm vú”**.
+- Nhấn vào ô **“Chọn ảnh siêu âm…”**.
+- Chọn file ảnh trên máy tính rồi chờ hệ thống xử lý:
+  - Mô hình sẽ tự động:
+    - Phân đoạn vùng nghi ngờ trên ảnh.
+    - Phân loại hình ảnh vào 1 trong 3 nhóm: **Bình thường / U lành tính / U ác tính**.
+  - Bạn sẽ thấy:
+    - Ảnh gốc đã chuẩn hóa.
+    - Ảnh chồng lớp phân đoạn (màu xanh: lành, đỏ: ác, viền vàng: vùng tổn thương).
+    - Biểu đồ cột thể hiện xác suất từng nhóm.
+
+**Bước 3. (Tùy chọn) Nhập thông tin lâm sàng**
+
+- Ở phần **“📊 Thông tin lâm sàng (dựa trên mô hình METABRIC)”**:
+  - Điền các thông tin cơ bản: tuổi, kích thước u, số hạch dương tính, chỉ số NPI, tình trạng ER/PR/HER2.
+  - Nhấn nút **“🔮 Dự đoán từ mô hình lâm sàng METABRIC”**.
+- Hệ thống sẽ hiển thị:
+  - Điểm nguy cơ sống còn (mô hình Cox).
+  - Xác suất tái phát (mô hình XGBoost).
+  - Giai đoạn u dự đoán (Random Forest).
+
+**Bước 4. Xem đánh giá tổng hợp**
+
+- Ở cuối trang, phần **“🧠 Đánh giá tổng hợp từ hai mô hình”**:
+  - Nếu có kết quả **cả hình ảnh và lâm sàng**, hệ thống sẽ:
+    - Tính **chỉ số nguy cơ kết hợp (minh họa)**.
+    - Phân nhóm: **Nguy cơ thấp / trung bình / cao**.
+    - Hiển thị gợi ý diễn giải đơn giản cho người dùng.
+
+> ⚠️ Tất cả kết quả trên chỉ nhằm mục đích **minh họa học thuật** và **thử nghiệm kỹ thuật**.  
+> Không được sử dụng để tự chẩn đoán, điều trị hay thay thế ý kiến bác sĩ.
 """)
 
     # Tải & load mô hình
     with st.spinner("🔧 Đang chuẩn bị mô hình..."):
         download_models()
-        seg_model, class_model, clinical_model, clinical_meta = load_all_models()
+        seg_model, class_model, clinical_models, preprocess = load_all_models()
 
-    if clinical_model is None or clinical_meta is None:
-        st.error("❌ Không thể tải đầy đủ mô hình lâm sàng. Vui lòng kiểm tra lại file mô hình.")
-    
+    if not clinical_models or preprocess is None:
+        st.warning("⚠️ Không tải được đầy đủ mô hình lâm sàng METABRIC. Ở phiên bản hiện tại, chỉ sử dụng được phần phân tích hình ảnh.")
+
     # Biến lưu kết quả để dùng cho phần kết hợp
     image_pred_label_en = None
     image_pred_label_vi = None
     image_pred_probs = None
-    clinical_pred_label = None
-    clinical_prob_death = None
+
+    clinical_risk_score = None
+    clinical_prob_recur = None
+    clinical_stage_pred = None
+
     labels_clf = ["benign", "malignant", "normal"]
     vi_map = {"benign": "U lành tính", "malignant": "U ác tính", "normal": "Bình thường"}
 
-    # 📌 Do kích thước lớn, mình chỉ gửi block thay thế phần xử lý ảnh 2D → thêm hỗ trợ ảnh 3D và DICOM (.dcm)
-# Bạn chỉ cần thay thế đoạn xử lý ở mục "7.1 PHÂN TÍCH ẢNH SIÊU ÂM" trong app gốc
+    # ---------------------------------------------
+    # 7.1 PHÂN TÍCH ẢNH SIÊU ÂM (2D / 3D / DICOM)
+    # ---------------------------------------------
+    st.subheader("📷 Phân tích ảnh siêu âm vú")
 
-import nibabel as nib
-import pydicom
-from pydicom.pixel_data_handlers.util import apply_voi_lut
-import tempfile
-from pathlib import Path
+    upload = st.file_uploader(
+        "📤 Chọn ảnh siêu âm (PNG/JPG hoặc NIfTI .nii/.gz hoặc DICOM .dcm)",
+        ["png", "jpg", "jpeg", "nii", "nii.gz", "dcm"]
+    )
 
-# --- Hàm hỗ trợ đọc NIfTI ---
-def load_nifti_slice(file, slice_strategy="middle"):
-    img = nib.load(file)
-    vol = img.get_fdata()
-    mid = vol.shape[2] // 2
-    if slice_strategy == "middle":
-        slice_img = vol[:, :, mid]
-    elif slice_strategy == "max_std":
-        idx = np.argmax([np.std(vol[:, :, i]) for i in range(vol.shape[2])])
-        slice_img = vol[:, :, idx]
-    return slice_img.astype(np.uint8)
-
-# --- Hàm hỗ trợ đọc DICOM ---
-def load_dicom_slice(file):
-    ds = pydicom.dcmread(file)
-    arr = apply_voi_lut(ds.pixel_array, ds)
-    arr = arr.astype(np.float32)
-    arr = (arr - arr.min()) / (arr.max() - arr.min()) * 255
-    return arr.astype(np.uint8)
-
-# --- Tự động đọc ảnh 3D từ .nii/.gz hoặc DICOM .dcm ---
-def load_3d_slice(upload):
-    suffix = Path(upload.name).suffix.lower()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(upload.read())
-        tmp_path = tmp.name
-    try:
-        if suffix in [".nii", ".gz"]:
-            return load_nifti_slice(tmp_path), "3D"
-        elif suffix == ".dcm":
-            return load_dicom_slice(tmp_path), "DICOM"
+    if upload is not None:
+        suffix = Path(upload.name).suffix.lower()
+        if suffix in [".png", ".jpg", ".jpeg"]:
+            arr = np.frombuffer(upload.read(), np.uint8)
+            gray = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+            is_3d = False
         else:
-            st.error("❌ Định dạng ảnh 3D chưa hỗ trợ đọc.")
-            return None, None
-    except Exception as e:
-        st.error(f"❌ Không thể đọc ảnh: {e}")
-        return None, None
+            gray, dim = load_3d_slice(upload)
+            is_3d = True
 
-# ------------------------------
-# Tải ảnh 2D hoặc 3D/DICOM
-upload = st.file_uploader("📤 Chọn ảnh siêu âm (PNG/JPG hoặc NIfTI .nii/.gz hoặc DICOM .dcm)",
-                          ["png", "jpg", "jpeg", "nii", "nii.gz", "dcm"])
+        if gray is not None:
+            st.info(f"📁 Hệ thống phát hiện ảnh {'3D' if is_3d else '2D'} – đang tiến hành xử lý minh họa...")
+            gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
 
-if upload:
-    suffix = Path(upload.name).suffix.lower()
-    if suffix in [".png", ".jpg", ".jpeg"]:
-        arr = np.frombuffer(upload.read(), np.uint8)
-        gray = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
-        is_3d = False
-    elif suffix in [".nii", ".gz", ".dcm"]:
-        gray, dim = load_3d_slice(upload)
-        is_3d = True
+            x_seg, g_seg = prep(gray, get_input_hwc(seg_model))
+            x_clf, g_clf = prep(gray, get_input_hwc(class_model))
+
+            seg_pred = seg_model.predict(x_seg, verbose=0)[0]
+            mask = np.argmax(seg_pred, -1).astype(np.uint8)
+            overlay_img = overlay(g_seg, mask)
+
+            probs = class_model.predict(x_clf, verbose=0)[0]
+            idx = int(np.argmax(probs))
+
+            image_pred_label_en = labels_clf[idx]
+            image_pred_label_vi = vi_map[image_pred_label_en]
+            image_pred_probs = probs
+
+            col1, col2 = st.columns(2)
+            with col1:
+                st.image(g_clf, caption="Ảnh đầu vào (đã chuẩn hóa kích thước)", use_column_width=True)
+            with col2:
+                st.image(overlay_img, caption="Kết quả phân đoạn khối u (minh họa)", use_column_width=True)
+
+            st.success(f"🔍 Mô hình hình ảnh dự đoán: **{image_pred_label_vi}** (xác suất ≈ {probs[idx]*100:.1f}%)")
+
+            df_img = pd.DataFrame({
+                "Nhóm": ["Lành tính", "Ác tính", "Bình thường"],
+                "Xác suất (%)": (probs * 100).round(2)
+            })
+
+            st.altair_chart(
+                alt.Chart(df_img).mark_bar().encode(
+                    x="Nhóm",
+                    y="Xác suất (%)",
+                    tooltip=["Nhóm", "Xác suất (%)"],
+                ),
+                use_container_width=True,
+            )
     else:
-        st.error("❌ Định dạng ảnh không được hỗ trợ.")
-        gray = None
-
-    if gray is not None:
-        st.info(f"📁 Hệ thống phát hiện ảnh {'3D' if is_3d else '2D'} – đang xử lý...")
-        gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
-
-        x_seg, g_seg = prep(gray, get_input_hwc(seg_model))
-        x_clf, g_clf = prep(gray, get_input_hwc(class_model))
-
-        seg_pred = seg_model.predict(x_seg, verbose=0)[0]
-        mask = np.argmax(seg_pred, -1).astype(np.uint8)
-        overlay_img = overlay(g_seg, mask)
-
-        probs = class_model.predict(x_clf, verbose=0)[0]
-        idx = int(np.argmax(probs))
-
-        image_pred_label_en = labels_clf[idx]
-        image_pred_label_vi = vi_map[image_pred_label_en]
-        image_pred_probs = probs
-
-        col1, col2 = st.columns(2)
-        with col1:
-            st.image(g_clf, caption="Ảnh đầu vào (chuẩn hóa)", use_column_width=True)
-        with col2:
-            st.image(overlay_img, caption="Kết quả phân đoạn", use_column_width=True)
-
-        st.success(f"🔍 Mô hình hình ảnh dự đoán: **{image_pred_label_vi}** ({probs[idx]*100:.1f}%)")
-
-        df_img = pd.DataFrame({
-            "Nhóm": ["Lành tính", "Ác tính", "Bình thường"],
-            "Xác suất (%)": (probs * 100).round(2)
-        })
-
-        st.altair_chart(
-            alt.Chart(df_img).mark_bar().encode(
-                x="Nhóm",
-                y="Xác suất (%)",
-                tooltip=["Nhóm", "Xác suất (%)"],
-            ),
-            use_container_width=True,
-        )
-else:
-    st.info("👆 Hãy tải lên một ảnh siêu âm để mô hình tiến hành minh họa.")
+        st.info("👆 Hãy tải lên một ảnh siêu âm để mô hình tiến hành minh họa kết quả.")
 
     # ---------------------------------------------
-    # 7.2 MÔ HÌNH LÂM SÀNG (RANDOMFOREST)
+    # 7.2 MÔ HÌNH LÂM SÀNG METABRIC
     # ---------------------------------------------
-    st.subheader("📊 Thông tin lâm sàng (minh họa)")
+    st.subheader("📊 Thông tin lâm sàng (dựa trên mô hình METABRIC)")
 
-    if clinical_model is None or clinical_meta is None:
-        st.warning("Không có mô hình lâm sàng khả dụng, bỏ qua phần này.")
+    if not clinical_models or preprocess is None:
+        st.warning("⚠️ Không có mô hình lâm sàng METABRIC khả dụng, phần này sẽ được bỏ qua.")
     else:
-        feature_names = clinical_model.feature_names_in_
-        label_map = clinical_meta["label_map"]
-        inv_label = {v: k for k, v in label_map.items()}
+        num_features = preprocess["num_features"]
+        cat_features = preprocess["cat_features"]
+        encoders = preprocess["encoders"]
+        stage_encoder = preprocess["stage_encoder"]
+        features = preprocess["features"]
 
-        with st.form("clinical_form"):
-            col_a, col_b, col_c = st.columns(3)
+        with st.form("clinical_form_metabric"):
+            col_a, col_b = st.columns(2)
 
             with col_a:
-                age = st.number_input("Tuổi tại chẩn đoán (Age at Diagnosis)", 0, 120, 50)
+                age = st.number_input("Tuổi tại thời điểm chẩn đoán (Age at Diagnosis)", 18, 100, 50)
                 size = st.number_input("Kích thước khối u (Tumor Size, mm)", 0, 200, 20)
                 lymph = st.number_input("Số hạch dương tính (Lymph nodes examined positive)", 0, 50, 0)
-                mut = st.number_input("Số lượng đột biến (Mutation Count)", 0, 10000, 0)
-                npi = st.number_input("Chỉ số Nottingham (NPI)", 0.0, 10.0, 4.0)
-                os_m = st.number_input("Thời gian sống toàn bộ (Overall Survival, tháng)", 0.0, 300.0, 60.0)
+                npi = st.number_input("Chỉ số tiên lượng Nottingham (Nottingham prognostic index)", 0.0, 10.0, 4.0)
 
             with col_b:
-                sx = st.selectbox("Loại phẫu thuật vú (Type of Breast Surgery)",
-                                  ["Breast Conserving", "Mastectomy"])
-                grade = st.selectbox("Độ mô học (Neoplasm Histologic Grade)", [1, 2, 3])
-                stage = st.selectbox("Giai đoạn u (Tumor Stage)", [1, 2, 3, 4])
-                sex = st.selectbox("Giới tính (Sex)", ["Female", "Male"])
-                cell = st.selectbox("Cellularity", ["High", "Low", "Moderate"])
-                chemo = st.selectbox("Hóa trị (Chemotherapy)", ["No", "Yes"])
-                hormone = st.selectbox("Liệu pháp nội tiết (Hormone Therapy)", ["No", "Yes"])
+                er = st.selectbox("Tình trạng ER (ER Status)", ["Negative", "Positive"])
+                pr = st.selectbox("Tình trạng PR (PR Status)", ["Negative", "Positive"])
+                her2 = st.selectbox("Tình trạng HER2 (HER2 Status)", ["Negative", "Positive"])
 
-            with col_c:
-                radio = st.selectbox("Xạ trị (Radio Therapy)", ["No", "Yes"])
-                er = st.selectbox("ER Status", ["Negative", "Positive"])
-                pr = st.selectbox("PR Status", ["Negative", "Positive"])
-                her2 = st.selectbox("HER2 Status", ["Negative", "Positive"])
-                gene = st.selectbox(
-                    "3-Gene classifier subtype",
-                    [
-                        "ER+/HER2+",
-                        "ER+/HER2- High Prolif",
-                        "ER+/HER2- Low Prolif",
-                        "ER-/HER2+",
-                        "ER-/HER2-",
-                    ],
-                )
-                pam50 = st.selectbox(
-                    "Pam50 + Claudin-low subtype",
-                    ["Basal-like", "Claudin-low", "HER2-enriched",
-                     "Luminal A", "Luminal B", "Normal-like"],
-                )
-                relapse = st.selectbox("Trạng thái tái phát (Relapse Free Status)",
-                                       ["Not Recurred", "Recurred"])
-
-            submit_clinical = st.form_submit_button("🔮 Dự đoán từ mô hình lâm sàng")
+            submit_clinical = st.form_submit_button("🔮 Dự đoán từ mô hình lâm sàng METABRIC")
 
         if submit_clinical:
+            # Tạo row đúng tên biến
             row = {
                 "Age at Diagnosis": age,
                 "Tumor Size": size,
                 "Lymph nodes examined positive": lymph,
-                "Mutation Count": mut,
                 "Nottingham prognostic index": npi,
-                "Overall Survival (Months)": os_m,
-                "Type of Breast Surgery": sx,
-                "Neoplasm Histologic Grade": grade,
-                "Tumor Stage": stage,
-                "Sex": sex,
-                "Cellularity": cell,
-                "Chemotherapy": chemo,
-                "Hormone Therapy": hormone,
-                "Radio Therapy": radio,
                 "ER Status": er,
                 "PR Status": pr,
                 "HER2 Status": her2,
-                "3-Gene classifier subtype": gene,
-                "Pam50 + Claudin-low subtype": pam50,
-                "Relapse Free Status": relapse,
             }
 
-            X = pd.DataFrame([row], columns=feature_names)
+            X = pd.DataFrame([row])
 
-            y = int(clinical_model.predict(X)[0])
-            pred_label = inv_label[y]
-            clinical_pred_label = pred_label
+            # Áp encoder cho biến phân loại
+            for col in cat_features:
+                le = encoders[col]
+                X[col] = le.transform(X[col].astype(str))
 
-            if "Deceased" in label_map:
-                prob_death = float(
-                    clinical_model.predict_proba(X)[0][label_map["Deceased"]]
+            # Đảm bảo đúng thứ tự features
+            X = X[features]
+
+            # 1) Cox – risk score
+            try:
+                risk = float(clinical_models["cox"].predict_partial_hazard(X)[0])
+                clinical_risk_score = risk
+                st.info(
+                    f"🕒 Mô hình sống còn (Cox) – risk score ≈ **{risk:.3f}** "
+                    "(>1 nghĩa là nguy cơ cao hơn trung vị trong tập METABRIC)."
                 )
-            else:
-                prob_death = float(np.max(clinical_model.predict_proba(X)[0]))
-            clinical_prob_death = prob_death
+            except Exception as e:
+                st.warning(f"Không tính được risk Cox: {e}")
 
-            if pred_label == "Deceased":
-                st.error(f"🧬 Mô hình lâm sàng dự đoán kết cục: **{pred_label}**")
-            else:
-                st.success(f"🧬 Mô hình lâm sàng dự đoán kết cục: **{pred_label}**")
+            # 2) XGBoost – Recurrence
+            try:
+                prob_rec = float(clinical_models["xgb_recur"].predict_proba(X)[0, 1])
+                clinical_prob_recur = prob_rec
+                st.info(f"🔁 Xác suất tái phát (XGBoost) ≈ **{prob_rec*100:.1f}%**")
+            except Exception as e:
+                st.warning(f"Không tính được xác suất tái phát: {e}")
 
-            st.write(f"📈 Xác suất tử vong ước tính: **{prob_death*100:.1f}%**")
+            # 3) RandomForest – Stage
+            try:
+                if stage_encoder is not None and clinical_models["rf_stage"] is not None:
+                    code = int(clinical_models["rf_stage"].predict(X)[0])
+                    label = stage_encoder.inverse_transform([code])[0]
+                    clinical_stage_pred = label
+                    st.info(f"📌 Giai đoạn u dự đoán (Random Forest) trên dữ liệu METABRIC: **{label}**")
+            except Exception as e:
+                st.warning(f"Không dự đoán được giai đoạn: {e}")
 
     # ---------------------------------------------
     # 7.3 ĐÁNH GIÁ TỔNG HỢP (ẢNH + LÂM SÀNG)
@@ -516,34 +514,35 @@ else:
     st.markdown("---")
     st.subheader("🧠 Đánh giá tổng hợp từ hai mô hình")
 
-    if (image_pred_probs is None) and (clinical_prob_death is None):
-        st.info("Khi có cả **kết quả mô hình hình ảnh** và **kết quả mô hình lâm sàng**, "
-                "hệ thống sẽ hiển thị đánh giá tổng hợp tại đây.")
+    if (image_pred_probs is None) and (clinical_prob_recur is None):
+        st.info(
+            "Khi có cả **kết quả mô hình hình ảnh** và **kết quả mô hình lâm sàng**, "
+            "hệ thống sẽ hiển thị đánh giá tổng hợp tại đây."
+        )
     else:
-        # Diễn giải riêng từng mô hình
+        p_malignant = None
+
         if image_pred_probs is not None:
             p_malignant = float(image_pred_probs[labels_clf.index("malignant")])
             st.write("🔬 **Nhận định từ mô hình hình ảnh:**")
             st.write(
                 f"- Kết luận: **{image_pred_label_vi}** "
-                f"(xác suất ác tính ≈ {p_malignant*100:.1f}%)."
+                f"(xác suất ác tính ước tính ≈ {p_malignant*100:.1f}%)."
             )
-        else:
-            p_malignant = None
 
-        if clinical_prob_death is not None:
-            st.write("📋 **Nhận định từ mô hình lâm sàng:**")
+        if clinical_prob_recur is not None:
+            st.write("📋 **Nhận định từ mô hình lâm sàng (METABRIC):**")
             st.write(
-                f"- Kết cục dự đoán: **{clinical_pred_label}** "
-                f"(xác suất tử vong ≈ {clinical_prob_death*100:.1f}%)."
+                f"- Xác suất tái phát ước tính ≈ **{clinical_prob_recur*100:.1f}%**."
             )
-        else:
-            clinical_prob_death = None
+            if clinical_stage_pred is not None:
+                st.write(f"- Giai đoạn u dự đoán: **{clinical_stage_pred}**.")
+            if clinical_risk_score is not None:
+                st.write(f"- Risk Cox ≈ **{clinical_risk_score:.3f}**.")
 
-        # Nếu có đủ cả hai → tính chỉ số nguy cơ kết hợp (heuristic)
-        if (p_malignant is not None) and (clinical_prob_death is not None):
-            # Chỉ số nguy cơ kết hợp: 60% từ hình ảnh, 40% từ lâm sàng (minh họa)
-            combined_risk = 0.6 * p_malignant + 0.4 * clinical_prob_death
+        # Nếu có đủ cả 2 → risk tổng hợp (minh họa)
+        if (p_malignant is not None) and (clinical_prob_recur is not None):
+            combined_risk = 0.6 * p_malignant + 0.4 * clinical_prob_recur
 
             if combined_risk < 0.3:
                 risk_group = "Nguy cơ thấp"
@@ -579,8 +578,10 @@ else:
                 "Không dùng để tự chẩn đoán hoặc thay thế ý kiến bác sĩ."
             )
         else:
-            st.info("Cần có đủ cả **kết quả hình ảnh** và **kết quả lâm sàng** "
-                    "để tính toán chỉ số nguy cơ kết hợp.")
+            st.info(
+                "Cần có đủ cả **kết quả hình ảnh** và **kết quả lâm sàng** "
+                "để tính toán chỉ số nguy cơ kết hợp."
+            )
 
 # =====================================================
 # 8) CHÂN TRANG (FOOTER)
