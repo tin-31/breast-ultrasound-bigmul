@@ -78,9 +78,8 @@ MODEL_DIR = "models"
 
 drive_files = {
     # Mô hình phân đoạn + phân loại ảnh siêu âm (mới)
-    "best_model_cbam_attention_unet.h5": "1YdAQeiwQtpY5rEvyNeUGlbcK9U51D8yP",
-    "breast_ultrasound_classifier_ft.keras": "1t10DVeMT1s7fNEToMV3PLI_5-HFbBm_b",
-
+    "best_model_cbam_attention_unet.h5": "1fXPICuTkETep2oPiA56l0uMai2GusEJH",
+    "best_model_cbam_attention_unet_fixed.keras": "1axOg7N5ssJrMec97eV-JMPzID26ynzN1",
     # Mô hình lâm sàng METABRIC
     "model_cox.joblib": "1XtaTE_AjMAnNv5pO_u5Z3xC1PE_oYETq",
     "model_logistic.joblib": "1zdcXp1IvGXQT87XBTLUvyV0wmQFVFI4d",
@@ -119,7 +118,7 @@ def load_all_models():
     )
 
     class_model = load_model(
-        os.path.join(MODEL_DIR, "breast_ultrasound_classifier_ft.keras"),
+        os.path.join(MODEL_DIR, "best_model_cbam_attention_unet_fixed.keras""),
         compile=False
     )
 
