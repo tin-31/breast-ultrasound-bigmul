@@ -286,7 +286,7 @@ elif chon_trang == "Nguồn dữ liệu & Bản quyền":
 | **BUSI – Breast Ultrasound Images Dataset** (Arya Shah, Kaggle) | Ảnh siêu âm tuyến vú | [Mở liên kết](https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset) |
 | **BUS-UCLM Breast Ultrasound Dataset** (Orvile, Kaggle) | Ảnh siêu âm tuyến vú | [Mở liên kết](https://www.kaggle.com/datasets/orvile/bus-uclm-breast-ultrasound-dataset) |
 | **Breast Lesions USG (TCIA)** | Ảnh siêu âm tổn thương vú | [Mở liên kết](https://www.cancerimagingarchive.net/collection/breast-lesions-usg/) |
-| **Breast Cancer Clinical Data / METABRIC** | Dữ liệu lâm sàng ung thư vú | Các kho dữ liệu công khai (TCGA, METABRIC, Mendeley, v.v.) |
+| **Breast Cancer Clinical Data / METABRIC** | Dữ liệu lâm sàng ung thư vú | [Mở liên kết](https://data.mendeley.com/datasets/dbz42w9x8h/4) |
 
 ---
 
@@ -320,7 +320,7 @@ elif chon_trang == "Ứng dụng":
     - Phân loại hình ảnh vào 1 trong 3 nhóm: **Bình thường / U lành tính / U ác tính**.
   - Bạn sẽ thấy:
     - Ảnh gốc đã chuẩn hóa.
-    - Ảnh chồng lớp phân đoạn (màu xanh: lành, đỏ: ác, viền vàng: vùng tổn thương).
+    - Ảnh chồng lớp phân đoạn (màu xanh: lành, đỏ: ác).
     - Biểu đồ cột thể hiện xác suất từng nhóm.
 
 **Bước 3. (Tùy chọn) Nhập thông tin lâm sàng**
@@ -593,5 +593,5 @@ st.markdown("""
 Không sử dụng cho **chẩn đoán, điều trị hoặc tư vấn y tế**.  
 
 © 2025 – Dự án AI Siêu âm Vú.  
-Tác giả minh họa: Lê Vũ Anh Tin – Trường THPT Chuyên Nguyễn Du.
+Tác giả: Lê Vũ Anh Tin – Trường THPT Chuyên Nguyễn Du.
 """)
