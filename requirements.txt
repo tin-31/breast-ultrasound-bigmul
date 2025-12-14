@@ -13,3 +13,4 @@ joblib
 xgboost==3.1.2
 lifelines==0.30.0
 matplotlib
+fpdf
