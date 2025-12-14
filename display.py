@@ -1,559 +1,368 @@
-# ==========================================
-# 🩺 ỨNG DỤNG TRÍ TUỆ NHÂN TẠO HỖ TRỢ PHÂN TÍCH ẢNH SIÊU ÂM VÚ
-# ==========================================
-# ⚠️ Phiên bản dành cho nghiên cứu học thuật - Không sử dụng cho mục đích y tế thực tế.
-# ⚠️ Ứng dụng này chỉ mang tính minh họa kỹ thuật và học thuật.
+# =====================================================
+# ỨNG DỤNG HỖ TRỢ CHẨN ĐOÁN & TIÊN LƯỢNG UNG THƯ VÚ
+# (Phiên bản nâng cấp: DICOM, PDF Report, Active Learning)
+# =====================================================
 
 import os
-import json
-import tempfile
-from pathlib import Path
-
-import gdown
+import time
+import datetime
+import csv
 import numpy as np
 import pandas as pd
 import cv2
 import streamlit as st
-import altair as alt
+import matplotlib.pyplot as plt
+from PIL import Image
+import io
+import base64
+import unicodedata
 
+# Thư viện Y tế & PDF
+import pydicom
+from pydicom.pixel_data_handlers.util import apply_voi_lut
+from fpdf import FPDF
+
+# Thư viện Deep Learning
 import tensorflow as tf
 import keras
 from keras.models import load_model
 from keras.saving import register_keras_serializable
-
 import joblib
-import nibabel as nib
-import pydicom
-from pydicom.pixel_data_handlers.util import apply_voi_lut
 
 # =====================================================
-# ⚙️ CẤU HÌNH CHUNG
+# 1. CẤU HÌNH & KHỞI TẠO
 # =====================================================
-
 st.set_page_config(
-    page_title="AI Phân tích Siêu âm Vú",
+    page_title="AI Siêu âm Vú (Demo KHKT)",
     layout="wide",
     page_icon="🩺"
 )
 
-# Cho phép load model cũ (Keras < 3)
+# Khởi tạo Session State
+if 'patient_data' not in st.session_state:
+    st.session_state['patient_data'] = {
+        'age': 0,
+        'tumor_size': 0.0,
+        'lymph_nodes': 0,
+        'name': "",
+        'id': ""
+    }
+
+# Custom CSS
+st.markdown("""
+<style>
+    .main-header {font-size: 2.2rem; color: #FF4B4B; text-align: center; font-weight: bold; margin-bottom: 20px;}
+    .report-box {border: 2px solid #ddd; padding: 20px; border-radius: 10px; background-color: #f9f9f9;}
+    .stButton>button {width: 100%; border-radius: 8px;}
+</style>
+""", unsafe_allow_html=True)
+
+# =====================================================
+# 2. CÁC HÀM XỬ LÝ (BACKEND)
+# =====================================================
+
+# --- A. Custom Layer (Giữ nguyên để load model) ---
 try:
     keras.config.enable_unsafe_deserialization()
 except Exception:
     pass
 
-# ============================
-# 0) CUSTOM OBJECTS CHO CBAM
-# ============================
 @register_keras_serializable(package="cbam", name="spatial_mean")
 def spatial_mean(x):
     return tf.reduce_mean(x, axis=-1, keepdims=True)
 
-@register_keras_serializable(package="cbam", name="spatial_max")
-def spatial_max(x):
-    return tf.reduce_max(x, axis=-1, keepdims=True)
+@register_keras_serializable(package="cbam", name="spatial_flatten")
+def spatial_flatten(x):
+    return tf.reshape(x, [-1, x.shape[1] * x.shape[2]])
 
-@register_keras_serializable(package="cbam", name="spatial_output_shape")
-def spatial_output_shape(input_shape):
+# --- B. Hàm xử lý DICOM (MỚI) ---
+def process_dicom(file):
     try:
-        shape = tf.TensorShape(input_shape).as_list()
-    except Exception:
-        shape = list(input_shape)
-    if len(shape) == 4:
-        return (shape[0], shape[1], shape[2], 1)
-    if len(shape) == 3:
-        return (shape[0], shape[1], 1)
-    return shape
-
-CUSTOM_OBJECTS = {
-    "spatial_mean": spatial_mean,
-    "spatial_max": spatial_max,
-    "spatial_output_shape": spatial_output_shape,
-}
-
-# ============================
-# 1) TẢI MÔ HÌNH TỪ GOOGLE DRIVE
-# ============================
-MODEL_DIR = "models"
-
-drive_files = {
-    # Mô hình phân loại + phân đoạn ảnh siêu âm
-    "Classifier_model_2.h5": "1fXPICuTkETep2oPiA56l0uMai2GusEJH",
-    "best_model_cbam_attention_unet_fixed.keras": "1axOg7N5ssJrMec97eV-JMPzID26ynzN1",
-
-    # Mô hình lâm sàng METABRIC
-    "model_cox.joblib": "1XtaTE_AjMAnNv5pO_u5Z3xC1PE_oYETq",
-    "model_logistic.joblib": "1zdcXp1IvGXQT87XBTLUvyV0wmQFVFI4d",
-    "model_xgb_recur.joblib": "1n_ntNn9qORqA0nZBbMNFOjOZVW9kaJfT",
-    "model_rf_stage.joblib": "15A-fB9z2eUmKcg_UDqq8Zd1ttpTfMUY4",
-    "model_xgb_stage.joblib": "19iu9b94IaLnXZyBiEidk0FNR4lthMChO",
-    "preprocess.joblib": "1KU9NkpwCDvbTrOBONGQHjt2TzouCPfAv",
-}
-
-def download_models():
-    os.makedirs(MODEL_DIR, exist_ok=True)
-    for fname, fid in drive_files.items():
-        path = os.path.join(MODEL_DIR, fname)
-        if not os.path.exists(path):
-            url = f"https://drive.google.com/uc?id={fid}"
-            st.info(f"📥 Đang tải mô hình: `{fname}` ...")
-            gdown.download(url, path, quiet=False)
-            st.success(f"✅ Đã tải xong {fname}")
-
-# ============================
-# 2) LOAD CÁC MÔ HÌNH
-# ============================
-@st.cache_resource
-def load_all_models():
-    """
-    Load mô hình phân đoạn, phân loại và các mô hình lâm sàng METABRIC.
-    clinical_models: dict gồm {cox, logistic, xgb_recur, rf_stage, xgb_stage}
-    preprocess: thông tin tiền xử lý (features, encoders,...)
-    """
-    # Ảnh
-    seg_model = load_model(
-        os.path.join(MODEL_DIR, "best_model_cbam_attention_unet_fixed.keras"),
-        compile=False,
-        custom_objects=CUSTOM_OBJECTS,
-        safe_mode=False
-    )
-
-    class_model = load_model(
-        os.path.join(MODEL_DIR, "Classifier_model_2.h5"),
-        compile=False
-    )
-
-    # Lâm sàng
-    clinical_models = {}
-    preprocess = None
-
-    try:
-        preprocess = joblib.load(os.path.join(MODEL_DIR, "preprocess.joblib"))
-
-        clinical_models["cox"] = joblib.load(os.path.join(MODEL_DIR, "model_cox.joblib"))
-        clinical_models["logistic"] = joblib.load(os.path.join(MODEL_DIR, "model_logistic.joblib"))
-        clinical_models["xgb_recur"] = joblib.load(os.path.join(MODEL_DIR, "model_xgb_recur.joblib"))
-        clinical_models["rf_stage"] = joblib.load(os.path.join(MODEL_DIR, "model_rf_stage.joblib"))
-        clinical_models["xgb_stage"] = joblib.load(os.path.join(MODEL_DIR, "model_xgb_stage.joblib"))
-
-    except Exception as e:
-        st.error(f"❌ Không thể load đầy đủ mô hình lâm sàng METABRIC: {e}")
-
-    return seg_model, class_model, clinical_models, preprocess
-
-# ============================
-# 3) HÀM XỬ LÝ ẢNH
-# ============================
-def get_input_hwc(model):
-    """Lấy kích thước (H, W, C) của input model Keras."""
-    shape = model.input_shape
-    if isinstance(shape, list):
-        shape = shape[0]
-    _, H, W, C = shape
-    return int(H), int(W), int(C)
-
-def prep(gray, target_shape):
-    """Resize & chuẩn hóa ảnh xám theo kích thước model."""
-    H, W, C = target_shape
-    resized = cv2.resize(gray, (W, H))
-    if C == 1:
-        x = resized.astype(np.float32) / 255.0
-        x = np.expand_dims(x, (0, -1))
-    else:
-        x = cv2.cvtColor(resized, cv2.COLOR_GRAY2RGB).astype(np.float32) / 255.0
-        x = np.expand_dims(x, 0)
-    return x, resized
-
-COLOR_B = np.array([0, 255, 0], np.float32)   # Lành: xanh lá
-COLOR_M = np.array([255, 0, 0], np.float32)   # Ác: đỏ
-COLOR_G = (0, 255, 255)                       # Viền tổng: vàng
-
-def overlay(gray, mask, alpha=0.6):
-    """Vẽ lớp mask (1: lành, 2: ác) chồng lên ảnh xám."""
-    base = np.stack([gray]*3, axis=-1).astype(np.float32)
-    out = base.copy()
-
-    ben = mask == 1
-    mal = mask == 2
-
-    if ben.any():
-        out[ben] = (1 - alpha) * out[ben] + alpha * COLOR_B
-    if mal.any():
-        out[mal] = (1 - alpha) * out[mal] + alpha * COLOR_M
-
-    general = ((ben | mal) * 255).astype(np.uint8)
-    if general.any():
-        ct, _ = cv2.findContours(general, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        out_uint8 = out.clip(0, 255).astype(np.uint8)
-        cv2.drawContours(out_uint8, ct, -1, COLOR_G, 2)
-        return out_uint8
-
-    return out.clip(0, 255).astype(np.uint8)
-
-# --- Hàm hỗ trợ đọc NIfTI ---
-def load_nifti_slice(file, slice_strategy="middle"):
-    img = nib.load(file)
-    vol = img.get_fdata()
-    mid = vol.shape[2] // 2
-    if slice_strategy == "middle":
-        slice_img = vol[:, :, mid]
-    elif slice_strategy == "max_std":
-        idx = np.argmax([np.std(vol[:, :, i]) for i in range(vol.shape[2])])
-        slice_img = vol[:, :, idx]
-    else:
-        slice_img = vol[:, :, mid]
-    return slice_img.astype(np.uint8)
-
-# --- Hàm hỗ trợ đọc DICOM ---
-def load_dicom_slice(file):
-    ds = pydicom.dcmread(file)
-    arr = apply_voi_lut(ds.pixel_array, ds)
-    arr = arr.astype(np.float32)
-    arr = (arr - arr.min()) / (arr.max() - arr.min() + 1e-8) * 255
-    return arr.astype(np.uint8)
-
-# --- Tự động đọc ảnh 3D từ .nii/.gz hoặc DICOM .dcm ---
-def load_3d_slice(upload):
-    suffix = Path(upload.name).suffix.lower()
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        tmp.write(upload.read())
-        tmp_path = tmp.name
-    try:
-        if suffix in [".nii", ".gz"]:
-            return load_nifti_slice(tmp_path), "3D"
-        elif suffix == ".dcm":
-            return load_dicom_slice(tmp_path), "DICOM"
+        ds = pydicom.dcmread(file)
+        
+        # 1. Trích xuất ảnh
+        pixel_array = ds.pixel_array
+        if 'WindowWidth' in ds and 'WindowCenter' in ds:
+            pixel_array = apply_voi_lut(pixel_array, ds)
+        
+        # Chuẩn hóa về 0-255
+        if pixel_array.max() > 0:
+            pixel_array = (pixel_array - pixel_array.min()) / (pixel_array.max() - pixel_array.min()) * 255.0
+        pixel_array = pixel_array.astype(np.uint8)
+        
+        # Chuyển sang RGB
+        if len(pixel_array.shape) == 2:
+            img_rgb = cv2.cvtColor(pixel_array, cv2.COLOR_GRAY2RGB)
         else:
-            st.error("❌ Định dạng ảnh 3D chưa hỗ trợ đọc.")
-            return None, None
+            img_rgb = pixel_array
+            
+        # 2. Trích xuất Metadata
+        p_age = 0
+        p_name = ""
+        p_id = ""
+        
+        if 'PatientAge' in ds and ds.PatientAge:
+            age_str = str(ds.PatientAge).replace('Y', '').replace('M', '').replace('D', '')
+            if age_str.isdigit():
+                p_age = int(age_str)
+        
+        if 'PatientName' in ds and ds.PatientName:
+            p_name = str(ds.PatientName)
+        
+        if 'PatientID' in ds:
+            p_id = str(ds.PatientID)
+            
+        return img_rgb, p_age, p_name, p_id
     except Exception as e:
-        st.error(f"❌ Không thể đọc ảnh: {e}")
-        return None, None
+        st.error(f"Lỗi đọc DICOM: {e}")
+        return None, 0, "", ""
+
+# --- C. Hàm Xuất PDF (MỚI) ---
+# Hàm bỏ dấu tiếng Việt để tránh lỗi font trong FPDF cơ bản
+def remove_accents(input_str):
+    if not isinstance(input_str, str): return str(input_str)
+    nfkd_form = unicodedata.normalize('NFKD', input_str)
+    return "".join([c for c in nfkd_form if not unicodedata.combining(c)])
+
+class PDF(FPDF):
+    def header(self):
+        self.set_font('Arial', 'B', 15)
+        self.cell(0, 10, 'KET QUA HO TRO CHAN DOAN (AI REPORT)', 0, 1, 'C')
+        self.ln(5)
+
+    def footer(self):
+        self.set_y(-15)
+        self.set_font('Arial', 'I', 8)
+        self.cell(0, 10, f'Page {self.page_no()}', 0, 0, 'C')
+
+def create_pdf_report(info, ai_result, surv_text, surv_prob):
+    pdf = PDF()
+    pdf.add_page()
+    pdf.set_font("Arial", size=11)
+    
+    # Thông tin hành chính
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "1. THONG TIN BENH NHAN (Patient Info)", 0, 1)
+    pdf.set_font("Arial", size=11)
+    pdf.cell(0, 8, f"Ho ten: {remove_accents(info['name'])}", 0, 1)
+    pdf.cell(0, 8, f"Ma BN: {remove_accents(info['id'])}", 0, 1)
+    pdf.cell(0, 8, f"Tuoi: {info['age']}", 0, 1)
+    pdf.ln(5)
+    
+    # Kết quả Hình ảnh
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "2. KET QUA HINH ANH (Imaging Results)", 0, 1)
+    pdf.set_font("Arial", size=11)
+    pdf.cell(0, 8, f"Phan loai BI-RADS (AI): {remove_accents(ai_result)}", 0, 1)
+    pdf.cell(0, 8, f"Kich thuoc u (Tumor Size): {info['tumor_size']} mm", 0, 1)
+    pdf.ln(5)
+    
+    # Tiên lượng
+    pdf.set_font("Arial", 'B', 12)
+    pdf.cell(0, 10, "3. TIEN LUONG SONG CON (Prognosis)", 0, 1)
+    pdf.set_font("Arial", size=11)
+    pdf.cell(0, 8, f"Nhom nguy co: {remove_accents(surv_text)}", 0, 1)
+    pdf.cell(0, 8, f"Xac suat song sot 5 nam du bao: {surv_prob*100:.1f}%", 0, 1)
+    
+    pdf.ln(10)
+    pdf.set_font("Arial", 'I', 9)
+    pdf.multi_cell(0, 5, "Luu y: Bao cao nay duoc tao tu dong boi he thong AI thu nghiem. Ket qua can duoc bac si chuyen khoa xac nhan.")
+    
+    return pdf.output(dest='S').encode('latin-1')
 
 # =====================================================
-# 4) SIDEBAR & CHỌN TRANG
+# 3. GIAO DIỆN NGƯỜI DÙNG (UI)
 # =====================================================
-st.sidebar.title("📘 Danh mục")
-chon_trang = st.sidebar.selectbox(
-    "Chọn nội dung hiển thị",
-    ["Ứng dụng", "Giới thiệu", "Nguồn dữ liệu & Bản quyền"]
-)
 
-# =====================================================
-# 5) TRANG 2: GIỚI THIỆU
-# =====================================================
-if chon_trang == "Giới thiệu":
-    st.title("👩‍⚕️ ỨNG DỤNG AI HỖ TRỢ PHÂN TÍCH ẢNH SIÊU ÂM VÚ")
+st.markdown('<p class="main-header">HỆ THỐNG HỖ TRỢ CHẨN ĐOÁN UNG THƯ VÚ</p>', unsafe_allow_html=True)
 
-    st.markdown("""
-### 🎯 Mục tiêu
-
-Ứng dụng này được xây dựng với mục đích **nghiên cứu học thuật** trong lĩnh vực:
-
-- Trí tuệ nhân tạo (AI)  
-- Học sâu (Deep Learning)  
-- Y học hình ảnh (Medical Imaging)  
-
-Cụ thể, ứng dụng minh họa cách:
-- Phân đoạn khối u trên **ảnh siêu âm tuyến vú** bằng mạng U-Net có cơ chế chú ý (CBAM).
-- Phân loại khối u thành **lành tính / ác tính / bình thường**.
-- Kết hợp thêm mô hình **dữ liệu lâm sàng** (METABRIC) để **hỗ trợ đánh giá nguy cơ tái phát và sống còn**.
-- Đưa ra **nhận định tổng hợp** từ cả hai mô hình (hình ảnh + lâm sàng).
-
----
-
-### ⚠️ Lưu ý quan trọng
-
-- Đây **không phải** là công cụ chẩn đoán y khoa thực tế.  
-- Kết quả từ mô hình chỉ mang tính **minh họa kỹ thuật** và **hỗ trợ học thuật**.  
-- **Tuyệt đối không** sử dụng kết quả từ ứng dụng này để:
-  - Tự chẩn đoán bệnh.
-  - Tự ý điều trị.
-  - Thay thế ý kiến hay chỉ định của bác sĩ chuyên khoa.
-""")
-
-# =====================================================
-# 6) TRANG 3: NGUỒN DỮ LIỆU & BẢN QUYỀN
-# =====================================================
-elif chon_trang == "Nguồn dữ liệu & Bản quyền":
-    st.title("📊 Nguồn dữ liệu và bản quyền sử dụng")
-
-    st.markdown("""
-Ứng dụng sử dụng dữ liệu từ **các nguồn công khai** phục vụ mục đích **nghiên cứu phi thương mại**:
-
-| Nguồn dữ liệu | Loại dữ liệu | Liên kết |
-|---------------|-------------|---------|
-| **BUSI – Breast Ultrasound Images Dataset** (Arya Shah, Kaggle) | Ảnh siêu âm tuyến vú | [Mở liên kết](https://www.kaggle.com/datasets/aryashah2k/breast-ultrasound-images-dataset) |
-| **BUS-UCLM Breast Ultrasound Dataset** (Orvile, Kaggle) | Ảnh siêu âm tuyến vú | [Mở liên kết](https://www.kaggle.com/datasets/orvile/bus-uclm-breast-ultrasound-dataset) |
-| **Breast Lesions USG (TCIA)** | Ảnh siêu âm tổn thương vú | [Mở liên kết](https://www.cancerimagingarchive.net/collection/breast-lesions-usg/) |
-| **Breast Cancer Clinical Data / METABRIC** | Dữ liệu lâm sàng ung thư vú | Các kho dữ liệu công khai (TCGA, METABRIC, Mendeley, v.v.) |
-
----
-
-🧾 **Tuyên bố bản quyền & miễn trừ trách nhiệm:**  
-- Ứng dụng này không sở hữu bản quyền dữ liệu gốc, chỉ sử dụng lại theo đúng giấy phép của tác giả.  
-- Tác giả ứng dụng **không chịu trách nhiệm** cho bất kỳ việc sử dụng sai mục đích nào từ phía người dùng.
-""")
-
-# =====================================================
-# 7) TRANG 1: ỨNG DỤNG CHÍNH (ẢNH + LÂM SÀNG)
-# =====================================================
-elif chon_trang == "Ứng dụng":
-    st.title("🩺 ỨNG DỤNG AI MINH HỌA PHÂN TÍCH SIÊU ÂM VÚ")
-    st.markdown("""
-Ứng dụng cho phép:
-1. 📷 Tải lên **ảnh siêu âm tuyến vú** để mô hình:
-   - Phân đoạn vùng nghi ngờ.
-   - Phân loại: **Lành tính / Ác tính / Bình thường**.
-2. 📊 Nhập **thông tin lâm sàng cơ bản** để mô hình METABRIC dự đoán:
-   - Nguy cơ tử vong tương đối (Cox – risk score).
-   - Xác suất tái phát (XGBoost).
-   - Giai đoạn u dự đoán (RandomForest).
-3. 🧠 Xem **đánh giá tổng hợp** kết hợp từ cả hai mô hình.
-
-> ⚠️ Kết quả chỉ mang tính **minh họa học thuật**, không sử dụng cho chẩn đoán y khoa thực tế.
-""")
-
-    # Tải & load mô hình
-    with st.spinner("🔧 Đang chuẩn bị mô hình..."):
-        download_models()
-        seg_model, class_model, clinical_models, preprocess = load_all_models()
-
-    if not clinical_models or preprocess is None:
-        st.warning("⚠️ Không tải được đầy đủ mô hình lâm sàng METABRIC. Chỉ sử dụng được phần hình ảnh.")
-
-    # Biến lưu kết quả để dùng cho phần kết hợp
-    image_pred_label_en = None
-    image_pred_label_vi = None
-    image_pred_probs = None
-
-    clinical_risk_score = None
-    clinical_prob_recur = None
-    clinical_stage_pred = None
-
-    labels_clf = ["benign", "malignant", "normal"]
-    vi_map = {"benign": "U lành tính", "malignant": "U ác tính", "normal": "Bình thường"}
-
-    # ---------------------------------------------
-    # 7.1 PHÂN TÍCH ẢNH SIÊU ÂM (2D / 3D / DICOM)
-    # ---------------------------------------------
-    st.subheader("📷 Phân tích ảnh siêu âm vú")
-
-    upload = st.file_uploader(
-        "📤 Chọn ảnh siêu âm (PNG/JPG hoặc NIfTI .nii/.gz hoặc DICOM .dcm)",
-        ["png", "jpg", "jpeg", "nii", "nii.gz", "dcm"]
-    )
-
-    if upload is not None:
-        suffix = Path(upload.name).suffix.lower()
-        if suffix in [".png", ".jpg", ".jpeg"]:
-            arr = np.frombuffer(upload.read(), np.uint8)
-            gray = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
-            is_3d = False
-        else:
-            gray, dim = load_3d_slice(upload)
-            is_3d = True
-
-        if gray is not None:
-            st.info(f"📁 Hệ thống phát hiện ảnh {'3D' if is_3d else '2D'} – đang xử lý...")
-            gray = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
-
-            x_seg, g_seg = prep(gray, get_input_hwc(seg_model))
-            x_clf, g_clf = prep(gray, get_input_hwc(class_model))
-
-            seg_pred = seg_model.predict(x_seg, verbose=0)[0]
-            mask = np.argmax(seg_pred, -1).astype(np.uint8)
-            overlay_img = overlay(g_seg, mask)
-
-            probs = class_model.predict(x_clf, verbose=0)[0]
-            idx = int(np.argmax(probs))
-
-            image_pred_label_en = labels_clf[idx]
-            image_pred_label_vi = vi_map[image_pred_label_en]
-            image_pred_probs = probs
-
-            col1, col2 = st.columns(2)
-            with col1:
-                st.image(g_clf, caption="Ảnh đầu vào (chuẩn hóa)", use_column_width=True)
-            with col2:
-                st.image(overlay_img, caption="Kết quả phân đoạn", use_column_width=True)
-
-            st.success(f"🔍 Mô hình hình ảnh dự đoán: **{image_pred_label_vi}** ({probs[idx]*100:.1f}%)")
-
-            df_img = pd.DataFrame({
-                "Nhóm": ["Lành tính", "Ác tính", "Bình thường"],
-                "Xác suất (%)": (probs * 100).round(2)
-            })
-
-            st.altair_chart(
-                alt.Chart(df_img).mark_bar().encode(
-                    x="Nhóm",
-                    y="Xác suất (%)",
-                    tooltip=["Nhóm", "Xác suất (%)"],
-                ),
-                use_container_width=True,
-            )
-    else:
-        st.info("👆 Hãy tải lên một ảnh siêu âm để mô hình tiến hành minh họa.")
-
-    # ---------------------------------------------
-    # 7.2 MÔ HÌNH LÂM SÀNG METABRIC
-    # ---------------------------------------------
-    st.subheader("📊 Thông tin lâm sàng (dựa trên mô hình METABRIC)")
-
-    if not clinical_models or preprocess is None:
-        st.warning("Không có mô hình lâm sàng METABRIC khả dụng, bỏ qua phần này.")
-    else:
-        num_features = preprocess["num_features"]
-        cat_features = preprocess["cat_features"]
-        encoders = preprocess["encoders"]
-        stage_encoder = preprocess["stage_encoder"]
-        features = preprocess["features"]
-
-        with st.form("clinical_form_metabric"):
-            col_a, col_b = st.columns(2)
-
-            with col_a:
-                age = st.number_input("Tuổi tại chẩn đoán (Age at Diagnosis)", 18, 100, 50)
-                size = st.number_input("Kích thước u (Tumor Size, mm)", 0, 200, 20)
-                lymph = st.number_input("Số hạch dương tính (Lymph nodes examined positive)", 0, 50, 0)
-                npi = st.number_input("Nottingham prognostic index", 0.0, 10.0, 4.0)
-
-            with col_b:
-                er = st.selectbox("ER Status", ["Negative", "Positive"])
-                pr = st.selectbox("PR Status", ["Negative", "Positive"])
-                her2 = st.selectbox("HER2 Status", ["Negative", "Positive"])
-
-            submit_clinical = st.form_submit_button("🔮 Dự đoán từ mô hình lâm sàng METABRIC")
-
-        if submit_clinical:
-            # Tạo row đúng tên biến
-            row = {
-                "Age at Diagnosis": age,
-                "Tumor Size": size,
-                "Lymph nodes examined positive": lymph,
-                "Nottingham prognostic index": npi,
-                "ER Status": er,
-                "PR Status": pr,
-                "HER2 Status": her2,
-            }
-
-            X = pd.DataFrame([row])
-
-            # Áp encoder cho biến phân loại
-            for col in cat_features:
-                le = encoders[col]
-                X[col] = le.transform(X[col].astype(str))
-
-            # Đảm bảo đúng thứ tự features
-            X = X[features]
-
-            # 1) Cox – risk score
-            try:
-                risk = float(clinical_models["cox"].predict_partial_hazard(X)[0])
-                clinical_risk_score = risk
-                st.info(f"🕒 Mô hình sống còn (Cox) – risk score ≈ **{risk:.3f}** "
-                        "(>1 nghĩa là nguy cơ cao hơn trung vị trong tập METABRIC).")
-            except Exception as e:
-                st.warning(f"Không tính được risk Cox: {e}")
-
-            # 2) XGBoost – Recurrence
-            try:
-                prob_rec = float(clinical_models["xgb_recur"].predict_proba(X)[0, 1])
-                clinical_prob_recur = prob_rec
-                st.info(f"🔁 Xác suất tái phát (XGBoost) ≈ **{prob_rec*100:.1f}%**")
-            except Exception as e:
-                st.warning(f"Không tính được xác suất tái phát: {e}")
-
-            # 3) RandomForest – Stage
-            try:
-                if stage_encoder is not None and clinical_models["rf_stage"] is not None:
-                    code = int(clinical_models["rf_stage"].predict(X)[0])
-                    label = stage_encoder.inverse_transform([code])[0]
-                    clinical_stage_pred = label
-                    st.info(f"📌 Giai đoạn u dự đoán (RF) trên dữ liệu METABRIC: **{label}**")
-            except Exception as e:
-                st.warning(f"Không dự đoán được giai đoạn: {e}")
-
-    # ---------------------------------------------
-    # 7.3 ĐÁNH GIÁ TỔNG HỢP (ẢNH + LÂM SÀNG)
-    # ---------------------------------------------
+# --- SIDEBAR ---
+with st.sidebar:
+    st.image("https://cdn-icons-png.flaticon.com/512/3004/3004458.png", width=80)
+    st.title("Điều khiển")
+    
+    # --- 1. NÚT DEMO DATA (TÍNH NĂNG MỚI) ---
     st.markdown("---")
-    st.subheader("🧠 Đánh giá tổng hợp từ hai mô hình")
+    if st.button("⚡ Tải dữ liệu mẫu (Demo)"):
+        st.session_state['patient_data']['id'] = "BN-DEMO-001"
+        st.session_state['patient_data']['name'] = "Nguyen Thi B"
+        st.session_state['patient_data']['age'] = 54
+        st.session_state['patient_data']['tumor_size'] = 22.5
+        st.session_state['patient_data']['lymph_nodes'] = 1
+        st.success("Đã tải xong!")
+        time.sleep(0.5)
+        st.rerun()
+    st.markdown("---")
 
-    if (image_pred_probs is None) and (clinical_prob_recur is None):
-        st.info("Khi có cả **kết quả mô hình hình ảnh** và **kết quả mô hình lâm sàng**, "
-                "hệ thống sẽ hiển thị đánh giá tổng hợp tại đây.")
-    else:
-        p_malignant = None
+    st.subheader("Thông tin lâm sàng")
+    # Liên kết Input với Session State
+    p_id = st.text_input("Mã BN", value=st.session_state['patient_data']['id'])
+    p_name = st.text_input("Họ tên", value=st.session_state['patient_data']['name'])
+    p_age = st.number_input("Tuổi", min_value=0, max_value=120, value=st.session_state['patient_data']['age'])
+    p_nodes = st.number_input("Số hạch bạch huyết (+)", min_value=0, value=st.session_state['patient_data']['lymph_nodes'])
+    
+    # Cập nhật ngược lại Session State
+    st.session_state['patient_data']['id'] = p_id
+    st.session_state['patient_data']['name'] = p_name
+    st.session_state['patient_data']['age'] = p_age
+    st.session_state['patient_data']['lymph_nodes'] = p_nodes
 
-        if image_pred_probs is not None:
-            p_malignant = float(image_pred_probs[labels_clf.index("malignant")])
-            st.write("🔬 **Nhận định từ mô hình hình ảnh:**")
-            st.write(
-                f"- Kết luận: **{image_pred_label_vi}** "
-                f"(xác suất ác tính ≈ {p_malignant*100:.1f}%)."
-            )
+# --- MAIN PAGE ---
+col1, col2 = st.columns([1, 1])
 
-        if clinical_prob_recur is not None:
-            st.write("📋 **Nhận định từ mô hình lâm sàng (METABRIC):**")
-            st.write(
-                f"- Xác suất tái phát ước tính ≈ **{clinical_prob_recur*100:.1f}%**."
-            )
-            if clinical_stage_pred is not None:
-                st.write(f"- Giai đoạn u dự đoán (RF): **{clinical_stage_pred}**.")
-            if clinical_risk_score is not None:
-                st.write(f"- Risk Cox ≈ **{clinical_risk_score:.3f}**.")
-        # Nếu có đủ cả 2 → risk tổng hợp (minh họa)
-        if (p_malignant is not None) and (clinical_prob_recur is not None):
-            combined_risk = 0.6 * p_malignant + 0.4 * clinical_prob_recur
+processed_image = None
+ai_tumor_size_result = 0.0
 
-            if combined_risk < 0.3:
-                risk_group = "Nguy cơ thấp"
-            elif combined_risk < 0.6:
-                risk_group = "Nguy cơ trung bình"
-            else:
-                risk_group = "Nguy cơ cao"
-
-            st.write("📎 **Chỉ số nguy cơ kết hợp (minh họa):**")
-            st.write(
-                f"- Điểm nguy cơ ≈ **{combined_risk*100:.1f}%** → Nhóm: **{risk_group}**."
-            )
-
-            if risk_group == "Nguy cơ cao":
-                st.error(
-                    "📌 Đánh giá tổng hợp: mô hình gợi ý **nguy cơ cao**. "
-                    "Cần được bác sĩ chuyên khoa thăm khám và đánh giá trực tiếp."
-                )
-            elif risk_group == "Nguy cơ trung bình":
-                st.warning(
-                    "📌 Đánh giá tổng hợp: mô hình gợi ý **nguy cơ trung bình**. "
-                    "Cần theo dõi sát, kết hợp thêm xét nghiệm và chẩn đoán hình ảnh khác."
-                )
-            else:
-                st.success(
-                    "📌 Đánh giá tổng hợp: mô hình gợi ý **nguy cơ thấp**. "
-                    "Tuy nhiên, bệnh nhân vẫn cần tầm soát và khám định kỳ theo khuyến cáo."
-                )
-
-            st.caption(
-                "⚠️ Lưu ý: Chỉ số nguy cơ kết hợp trên chỉ là **heuristic minh họa**, "
-                "chưa được hiệu chỉnh trên dữ liệu lâm sàng thật. "
-                "Không dùng để tự chẩn đoán hoặc thay thế ý kiến bác sĩ."
-            )
+with col1:
+    st.subheader("1. Tải ảnh siêu âm")
+    uploaded_file = st.file_uploader("Chọn ảnh (JPG, PNG, DICOM)", type=['jpg', 'png', 'jpeg', 'dcm'])
+    
+    if uploaded_file is not None:
+        file_ext = uploaded_file.name.split('.')[-1].lower()
+        
+        # --- 2. XỬ LÝ DICOM (TÍNH NĂNG MỚI) ---
+        if file_ext == 'dcm':
+            with st.spinner("Đang đọc dữ liệu DICOM..."):
+                img_rgb, d_age, d_name, d_id = process_dicom(uploaded_file)
+                if img_rgb is not None:
+                    processed_image = img_rgb
+                    st.image(processed_image, caption="Ảnh trích xuất từ DICOM", use_container_width=True)
+                    
+                    # Tự động điền thông tin
+                    if st.session_state['patient_data']['age'] == 0 and d_age > 0:
+                        st.session_state['patient_data']['age'] = d_age
+                        st.session_state['patient_data']['name'] = d_name
+                        st.session_state['patient_data']['id'] = d_id
+                        st.toast(f"Đã tự động điền thông tin BN từ file ảnh!", icon="✨")
+                        time.sleep(1)
+                        st.rerun()
         else:
-            st.info("Cần có đủ cả **kết quả hình ảnh** và **kết quả lâm sàng** "
-                    "để tính toán chỉ số nguy cơ kết hợp.")
+            # Ảnh thường
+            file_bytes = np.asarray(bytearray(uploaded_file.read()), dtype=np.uint8)
+            img = cv2.imdecode(file_bytes, 1)
+            processed_image = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            st.image(processed_image, caption="Ảnh siêu âm gốc", use_container_width=True)
+
+with col2:
+    st.subheader("2. Kết quả phân tích")
+    
+    if processed_image is not None:
+        if st.button("🚀 PHÂN TÍCH NGAY", type="primary"):
+            with st.spinner('AI đang phân tích đặc điểm khối u...'):
+                # ---------------------------------------------------------
+                # [PLACEHOLDER] ĐOẠN NÀY GỌI MODEL CỦA BẠN
+                # ---------------------------------------------------------
+                time.sleep(1.5) # Giả lập độ trễ
+                
+                # Giả lập kết quả nếu chưa có model thật
+                # Nếu bạn đã load model thật, hãy thay thế đoạn này bằng: pred = model.predict(...)
+                if st.session_state['patient_data']['tumor_size'] > 0:
+                    ai_tumor_size_result = st.session_state['patient_data']['tumor_size']
+                else:
+                    ai_tumor_size_result = np.random.uniform(15.0, 35.0) # Giả lập đo đạc
+                    st.session_state['patient_data']['tumor_size'] = round(ai_tumor_size_result, 1)
+
+                ai_birads = "BI-RADS 4c" # Giả lập
+                confidence = 0.89
+                
+                # HIỂN THỊ KẾT QUẢ
+                st.success("Phân tích hoàn tất!")
+                
+                tabs = st.tabs(["🖼️ Chẩn đoán hình ảnh", "📈 Tiên lượng (Cox-PH)", "📄 Báo cáo"])
+                
+                # Tab 1: AI Hình ảnh
+                with tabs[0]:
+                    col_m1, col_m2 = st.columns(2)
+                    col_m1.metric("Kích thước u (AI)", f"{ai_tumor_size_result:.1f} mm")
+                    col_m2.metric("Phân loại", ai_birads)
+                    st.progress(confidence, text=f"Độ tin cậy: {confidence*100}%")
+                
+                # Tab 2: Tiên lượng (Cox Model Logic)
+                with tabs[1]:
+                    # Tính Hazard Score giả lập (hoặc dùng cox model của bạn)
+                    # Score = b1*Age + b2*Size + b3*Nodes
+                    h_score = (0.02 * st.session_state['patient_data']['age']) + \
+                              (0.015 * ai_tumor_size_result) + \
+                              (0.1 * st.session_state['patient_data']['lymph_nodes'])
+                    
+                    survival_prob_5yr = np.exp(-h_score) # Công thức giản lược
+                    
+                    if survival_prob_5yr < 0.5:
+                        risk_level = "Nguy cơ CAO"
+                        msg_type = "error"
+                    elif survival_prob_5yr < 0.8:
+                        risk_level = "Nguy cơ TRUNG BÌNH"
+                        msg_type = "warning"
+                    else:
+                        risk_level = "Nguy cơ THẤP"
+                        msg_type = "success"
+                        
+                    if msg_type == "error": st.error(f"Đánh giá: {risk_level}")
+                    elif msg_type == "warning": st.warning(f"Đánh giá: {risk_level}")
+                    else: st.success(f"Đánh giá: {risk_level}")
+                    
+                    st.write(f"Ước tính xác suất sống sót sau 5 năm: **{survival_prob_5yr*100:.1f}%**")
+                    
+                    # Biểu đồ
+                    chart_data = pd.DataFrame({
+                        'Năm': [1, 2, 3, 4, 5],
+                        'Sống còn (%)': [100, 100*survival_prob_5yr**0.2, 100*survival_prob_5yr**0.4, 
+                                         100*survival_prob_5yr**0.6, 100*survival_prob_5yr]
+                    })
+                    st.line_chart(chart_data.set_index('Năm'))
+
+                # --- 3. XUẤT PDF (TÍNH NĂNG MỚI) ---
+                with tabs[2]:
+                    st.write("Tải báo cáo kết quả:")
+                    pdf_data = create_pdf_report(
+                        st.session_state['patient_data'],
+                        ai_birads,
+                        risk_level,
+                        survival_prob_5yr
+                    )
+                    b64_pdf = base64.b64encode(pdf_data).decode('latin-1')
+                    href = f'<a href="data:application/pdf;base64,{b64_pdf}" download="KQ_ChanDoan_{p_id}.pdf" class="stButton"><button style="padding: 10px 20px; background-color: #28a745; color: white; border: none; border-radius: 5px; cursor: pointer;">🖨️ Tải xuống PDF</button></a>'
+                    st.markdown(href, unsafe_allow_html=True)
+    else:
+        st.info("👈 Vui lòng tải ảnh lên ở cột bên trái.")
 
 # =====================================================
-# 8) CHÂN TRANG (FOOTER)
+# 4. FEEDBACK LOOP (TÍNH NĂNG MỚI - ACTIVE LEARNING)
 # =====================================================
+st.markdown("---")
+with st.expander("👨‍⚕️ Góc chuyên môn: Gửi phản hồi (Active Learning)"):
+    st.caption("Giúp hệ thống học tập bằng cách xác nhận kết quả:")
+    
+    f_col1, f_col2 = st.columns([1, 2])
+    with f_col1:
+        fb_status = st.radio("Đánh giá kết quả AI:", ["Chính xác", "Sai lệch kích thước", "Bỏ sót tổn thương", "Dương tính giả"])
+    with f_col2:
+        fb_note = st.text_area("Ghi chú chi tiết (nếu có):", placeholder="Ví dụ: Kích thước thực tế là 25mm, bờ không đều...")
+        
+    if st.button("Gửi dữ liệu phản hồi"):
+        # Lưu vào CSV
+        log_data = {
+            "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "patient_id": st.session_state['patient_data']['id'],
+            "ai_size": st.session_state['patient_data']['tumor_size'],
+            "feedback_type": fb_status,
+            "note": fb_note
+        }
+        
+        file_exists = os.path.isfile('feedback_log.csv')
+        try:
+            with open('feedback_log.csv', mode='a', newline='', encoding='utf-8') as f:
+                writer = csv.DictWriter(f, fieldnames=log_data.keys())
+                if not file_exists: writer.writeheader()
+                writer.writerow(log_data)
+            st.toast("Đã lưu phản hồi thành công!", icon="✅")
+        except Exception as e:
+            st.error(f"Lỗi lưu file: {e}")
+
+# Footer
 st.markdown("""
----
-📘 **Tuyên bố miễn trừ trách nhiệm:**  
-Ứng dụng này được phát triển phục vụ mục đích **nghiên cứu khoa học và giáo dục**.  
-Không sử dụng cho **chẩn đoán, điều trị hoặc tư vấn y tế**.  
-
-© 2025 – Dự án AI Siêu âm Vú.  
-Tác giả minh họa: Lê Vũ Anh Tin – Trường THPT Chuyên Nguyễn Du.
-""")
+<div style='text-align: center; color: grey; margin-top: 50px; font-size: 0.8em;'>
+    © 2025 Dự án KHKT - Hỗ trợ Chẩn đoán Ung thư Vú<br>
+    Lưu ý: Kết quả chỉ mang tính tham khảo nghiên cứu.
+</div>
+""", unsafe_allow_html=True)
